@@ -29,6 +29,13 @@ def container_path(key):
     return path if os.path.isabs(path) else os.path.join(workflow.basedir, path)
 
 
+def asset_path(path):
+    """A path from the run directory, else from the port (bundled defaults)."""
+    if os.path.isabs(path) or os.path.exists(path):
+        return path
+    return os.path.join(workflow.basedir, path)
+
+
 def res(label):
     return config["resources"][label]
 
@@ -956,7 +963,7 @@ rule multiqc:
                 f"{STATDIR}/{s}/{s}.mRSstat",
             )
         ],
-        config=config["multiqc_config"],
+        config=asset_path(config["multiqc_config"]),
     output:
         f"{O}/multiqc/multiqc_report.html",
         directory(f"{O}/multiqc/multiqc_data"),

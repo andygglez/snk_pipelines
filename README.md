@@ -17,7 +17,7 @@ reference only and are never edited.
 
 ## Contents
 
-1. [Setup](#setup)
+1. [Installation: uv or Docker](#installation-uv-or-docker)
 2. [Workflow at a glance](#workflow-at-a-glance)
 3. [The `pipeline` command](#the-pipeline-command)
 4. [Container specifications](#container-specifications)
@@ -28,23 +28,180 @@ reference only and are never edited.
 
 ---
 
-## Setup
+## Installation: uv or Docker
 
-You need:
+There are two supported ways to install the `pipeline` command:
 
-- **Snakemake ≥ 8** (tested with 9.27.0) and **Apptainer** (or Singularity).
-- **Python 3 with PyYAML** to run `pipeline.py`. The Python in Snakemake's
-  environment already has it.
+| | uv | Docker |
+|---|---|---|
+| Installs | Python env (Snakemake 9.27.0 + PyYAML) from `uv.lock` | uv env + the ports + Apptainer 1.3.5, in one image |
+| You also need | Apptainer (or Singularity) on the host | Docker, and permission to use `--privileged` |
+| Works on Rorqual / HPC | yes | no (Docker isn't available there) |
+| Best for | clusters, everyday use | workstations or cloud VMs without Apptainer |
 
-Make `pipeline` callable from any directory:
+Either way, the per-step Singularity images are downloaded separately with
+`pipeline pull` (see [Workflow at a glance](#workflow-at-a-glance)).
+
+### Option A: uv
+
+**1. Install uv** (once per machine, into `~/.local/bin`):
 
 ```bash
-ln -s /path/to/pipelines/pipeline.py ~/.local/bin/pipeline   # ~/.local/bin must be on PATH
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-`pipeline` finds Snakemake on your `PATH`, so activate its environment first.
-If it lives somewhere else, set `PIPELINE_SNAKEMAKE=/path/to/snakemake` or pass
-`--snakemake`.
+**2. Create the environment.** `uv sync` reads `pyproject.toml` and installs the
+exact versions pinned in `uv.lock` into `.venv/` inside the repository. If
+needed, it also downloads a matching Python (≥ 3.11):
+
+```bash
+cd /path/to/pipelines
+uv sync
+```
+
+**3. Call `pipeline`.** Pick one of these:
+
+```bash
+# a) through uv, from any directory (outputs go to the current directory)
+uv run --project /path/to/pipelines pipeline list
+
+# b) as a normal command on your PATH (recommended)
+uv tool install --editable /path/to/pipelines
+pipeline list
+
+# c) by activating the environment
+source /path/to/pipelines/.venv/bin/activate
+pipeline list
+```
+
+`pipeline` always uses the Snakemake installed next to it, from `uv.lock`, even
+if another `snakemake` is on your PATH.
+
+**4. Check Apptainer.** uv installs no system software, so `apptainer --version`
+must work. On Alliance clusters, run `module load apptainer`.
+
+**Then follow the [workflow](#workflow-at-a-glance):**
+
+```bash
+pipeline pull rnaseq                       # once; needs internet
+mkdir -p ~/projects/exp1 && cd ~/projects/exp1
+pipeline config rnaseq -p .
+# edit rnaseq.config.yaml (input, outdir, fasta, gtf, ...)
+pipeline run rnaseq -c rnaseq.config.yaml -n
+pipeline run rnaseq -c rnaseq.config.yaml -t 8 -B /data/genomes
+```
+
+**Updating.** After pulling new code (`git pull`), run `uv sync`. The tool
+install is editable, so code changes take effect immediately. When
+`pyproject.toml` or `uv.lock` change, refresh it with
+`uv tool install --editable --force /path/to/pipelines`.
+
+**On an offline cluster** (Rorqual), run the online steps on a login node and
+only the run on compute nodes:
+
+```bash
+# login node (internet)
+export UV_CACHE_DIR=/scratch/$USER/.uv-cache       # keep uv's cache off the small $HOME quota
+cd /scratch/$USER/pipelines
+uv sync
+uv tool install --editable .
+module load apptainer
+pipeline pull rnaseq
+
+# compute node (no internet): no download, no re-resolve
+module load apptainer
+cd /scratch/$USER/exp1
+pipeline run rnaseq -c rnaseq.config.yaml -t $SLURM_CPUS_PER_TASK -B /scratch/$USER
+# or, without the tool install:
+uv run --project /scratch/$USER/pipelines --frozen --offline pipeline run ...
+```
+
+`--frozen --offline` stops `uv run` from checking the lock against an index,
+which would fail without internet.
+
+**Without uv.** Any environment with Snakemake ≥ 8 and PyYAML also works. Link
+the script with `ln -s /path/to/pipelines/pipeline.py ~/.local/bin/pipeline`,
+and `pipeline` uses the `snakemake` found on PATH. You can also point it at one
+with `--snakemake` or `PIPELINE_SNAKEMAKE=/path/to/snakemake`.
+
+### Option B: Docker
+
+The `Dockerfile` (on top of `ghcr.io/astral-sh/uv`) installs Apptainer 1.3.5,
+runs `uv sync --frozen`, copies the ports and sets `pipeline` as the
+entrypoint. Images, inputs and results are never stored in the Docker image.
+They live in two mounted folders:
+
+| Mount | Holds |
+|---|---|
+| `/containers` | the Singularity images. Each port's `containers/` folder inside the Docker image points to `/containers/snk-<folder>/`, so one host folder keeps the images of every port between runs |
+| `/work` | the run directory: your config, samplesheet and outputs (`outdir`, `workdir`, `.snakemake/`) |
+
+**1. Build the image** (from the repository root; rebuild after changing the
+code or the ports):
+
+```bash
+docker build -t pipelines .
+```
+
+**2. Define a shorthand.** Add this to `~/.bashrc` so the mounts and flags
+aren't repeated each time:
+
+```bash
+alias dpipeline='docker run --rm -it --privileged --user "$(id -u):$(id -g)" \
+    -v "$HOME/pipeline-images":/containers -v "$PWD":/work pipelines'
+```
+
+| Flag | Why |
+|---|---|
+| `--privileged` | Apptainer needs it to start containers inside Docker. |
+| `--user "$(id -u):$(id -g)"` | Outputs are owned by you, not root. The image uses Apptainer's setuid mode, so this works even on hosts that block unprivileged user namespaces (Ubuntu 24.04+). |
+| `-v "$HOME/pipeline-images":/containers` | Keeps the downloaded images between runs. Create the folder first (`mkdir -p ~/pipeline-images`), or Docker creates it owned by root. |
+| `-v "$PWD":/work` | The current directory becomes the run directory. |
+
+**3. Download the images** (once per pipeline; needs internet):
+
+```bash
+mkdir -p ~/pipeline-images
+dpipeline list
+dpipeline pull rnaseq            # -> ~/pipeline-images/snk-rnaseq/
+```
+
+**4. Configure and run** from your analysis directory:
+
+```bash
+mkdir -p ~/projects/exp1 && cd ~/projects/exp1
+dpipeline config rnaseq -p .                       # writes ./rnaseq.config.yaml
+# edit rnaseq.config.yaml; keep paths relative to this folder
+dpipeline run rnaseq -c rnaseq.config.yaml -n      # dry run
+dpipeline run rnaseq -c rnaseq.config.yaml -t 8
+```
+
+**Data outside the run directory.** Inside Docker, only `/work` and
+`/containers` exist. Mount other folders at the same path they have on the
+host, and also bind them into the Apptainer containers with `-B`:
+
+```bash
+docker run --rm -it --privileged --user "$(id -u):$(id -g)" \
+    -v "$HOME/pipeline-images":/containers -v "$PWD":/work \
+    -v /data/genomes:/data/genomes:ro \
+    pipelines run rnaseq -c rnaseq.config.yaml -t 8 -B /data/genomes
+```
+
+The config can then use `fasta: /data/genomes/GRCh38.fa.gz` unchanged.
+
+**Reusing images you already have.** Mount an existing port folder directly,
+for example
+`-v /path/to/pipelines/snk-rnaseq/containers:/containers/snk-rnaseq`.
+
+**Troubleshooting**
+
+| Symptom | Fix |
+|---|---|
+| `image(s) missing` | Run `dpipeline pull <name>` with the same `/containers` mount. |
+| `Permission denied` writing in `/work` or `/containers` | The host folder belongs to root (created by Docker). Fix it with `sudo chown -R $USER: <folder>`. |
+| Apptainer `setgroups` / user namespace errors | `--privileged` is missing. |
+| `config file not found` | The config path must be inside the run directory (`/work`) or a mounted folder. |
+| Code changes have no effect | Rebuild the image (`docker build -t pipelines .`). |
 
 ---
 
@@ -401,24 +558,27 @@ SRR389222_sub1,SRR389222_sub1.fastq.gz,,
 ## Running on an offline cluster (Rorqual)
 
 Compute nodes have no internet, so do everything that downloads on a login
-node:
+node. With uv (see [Option A](#option-a-uv)):
 
 ```bash
 # login node (internet)
+export UV_CACHE_DIR=/scratch/$USER/.uv-cache
+cd /scratch/$USER/pipelines && uv sync && uv tool install --editable .
 module load apptainer
-source /scratch/<user>/claude_jobs/venv_snk/bin/activate
 pipeline list
 pipeline pull rnaseq                     # download images once
 # copy input data and references to /scratch beforehand; use local paths in the config
 
 # compute node (salloc / sbatch)
 module load apptainer
-source /scratch/<user>/claude_jobs/venv_snk/bin/activate
-cd /scratch/<user>/exp1
-pipeline run rnaseq -c rnaseq.config.yaml -t $SLURM_CPUS_PER_TASK -B /scratch/<user>
+cd /scratch/$USER/exp1
+pipeline run rnaseq -c rnaseq.config.yaml -t $SLURM_CPUS_PER_TASK -B /scratch/$USER
 ```
 
-- Bind `/scratch/<user>` (or whichever tree holds data and references). Only
+An existing Snakemake virtualenv works too: `source <venv>/bin/activate` instead
+of the uv steps.
+
+- Bind `/scratch/$USER` (or whichever tree holds data and references). Only
   the run directory is bound automatically.
 - Config paths must be local, because URLs trigger `fetch_remote`, which fails
   offline.
@@ -432,6 +592,8 @@ pipeline run rnaseq -c rnaseq.config.yaml -t $SLURM_CPUS_PER_TASK -B /scratch/<u
 ```
 pipelines/
 ├── pipeline.py               # the `pipeline` command
+├── pyproject.toml, uv.lock   # Python dependencies for uv
+├── Dockerfile                # Docker image: uv env + ports + Apptainer
 ├── README.md
 ├── nfcore-<pipeline>/        # nf-core source, reference only (never edited)
 └── snk-<pipeline>/           # Snakemake port
@@ -443,5 +605,6 @@ pipelines/
     │   └── samplesheet.csv   # test samplesheet
     ├── containers/           # Singularity images (filled by `pipeline pull`)
     ├── scripts/              # nf-core bin/ scripts and custom helpers
-    └── assets/               # nf-core assets (MultiQC configs, blacklists, …); not in hic
+    ├── assets/               # nf-core assets (MultiQC configs, blacklists, …); not in hic
+    └── DIAGRAMS.md / .html   # Mermaid diagrams of the command flow and config keys
 ```

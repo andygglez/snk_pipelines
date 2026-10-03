@@ -1,0 +1,22 @@
+[project]
+name = "pipelines"
+version = "0.1.0"
+description = "Snakemake ports of nf-core pipelines, driven by the `pipeline` command"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "snakemake==9.27.0",
+    "pyyaml",
+]
+
+[project.scripts]
+pipeline = "pipeline:main"
+
+# pipeline.py finds the snk-*/ ports next to itself, so the project must be
+# installed in editable mode (the default for `uv sync`), not as a wheel.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["pipeline"]

@@ -109,7 +109,12 @@ def missing_images(name, user_config=None):
 
 
 def find_snakemake(override):
-    exe = override or os.environ.get("PIPELINE_SNAKEMAKE") or shutil.which("snakemake")
+    # The snakemake installed next to this Python (uv sync / uv tool install)
+    # comes before PATH: `uv tool` exposes only `pipeline`, not snakemake.
+    sibling = os.path.join(os.path.dirname(sys.executable), "snakemake")
+    exe = (override or os.environ.get("PIPELINE_SNAKEMAKE")
+           or (sibling if os.access(sibling, os.X_OK) else None)
+           or shutil.which("snakemake"))
     if not exe:
         die("snakemake not found on PATH. Activate its environment, or pass "
             "--snakemake / set PIPELINE_SNAKEMAKE to the executable.")

@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>snk-methylseq diagrams</title>
+<style>
+:root { --bg:#ffffff; --fg:#1f2328; --muted:#59636e; --border:#d1d9e0; --code:#f6f8fa; --link:#0969da; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --border:#3d444d; --code:#151b23; --link:#4493f8; }
+}
+body { background:var(--bg); color:var(--fg); margin:0; font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+main { max-width:1200px; margin:0 auto; padding:24px 16px 64px; }
+h1,h2 { border-bottom:1px solid var(--border); padding-bottom:.3em; }
+a { color:var(--link); }
+code { background:var(--code); padding:.1em .35em; border-radius:4px; font-size:90%; }
+pre { background:var(--code); padding:12px; border-radius:6px; overflow:auto; }
+pre code { background:none; padding:0; }
+table { border-collapse:collapse; display:block; overflow-x:auto; margin:1em 0; }
+th,td { border:1px solid var(--border); padding:6px 10px; vertical-align:top; }
+th { background:var(--code); text-align:left; }
+.mermaid { font-family:Arial,Helvetica,sans-serif; background:#ffffff; border:1px solid var(--border); border-radius:8px; padding:12px; overflow-x:auto; margin:1em 0; cursor:zoom-in; }
+.mermaid svg { max-width:100% !important; height:auto; }
+.mermaid.full { cursor:zoom-out; }
+.mermaid.full svg { max-width:none !important; }
+.mermaid foreignObject { overflow:visible; }
+.hint { color:var(--muted); font-size:13px; }
+.mermaid-error { color:#cf222e; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<main><p class="hint">Diagrams are scaled to fit the page; click one to see it full size (scroll sideways), click again to fit.</p><div id="content"></div></main>
+<script type="text/plain" id="src"># snk-methylseq — pipeline diagrams
+
+Snakemake port of **nf-core/methylseq 4.2.0** (the `wgbs` pipeline of the `pipeline` command),
+with all four aligners: `bismark`, `bismark_hisat`, `bwameth` and `bwamem`. These diagrams show the
+flow of commands and data through `Snakefile`, and how each key in `config/config.yaml` changes
+those commands. They are written in Mermaid. You can view them on GitHub, in VS Code (with a
+Mermaid preview extension), or by opening `DIAGRAMS.html` in a browser.
+
+**How to read them**
+
+- `«key»` inside a command is a value that comes straight from `config/config.yaml`. `«args.X»` is the fixed tool argument string under `args:` (nf-core `ext.args`).
+- Dashed orange boxes are rules that only run under some settings (the condition is on the box).
+- Each rule runs in the image given by `config/containers.yaml`.
+- `outdir` holds the files nf-core publishes, mostly under `outdir/<aligner>/`. `workdir` holds intermediates that nf-core keeps in `work/`.
+- Unlike the other ports, methylseq has no gates: no step drops samples.
+- Rules run in shadow directories with their inputs linked under the file names Nextflow stages, so names embedded in outputs (BAM `@PG` lines, Bismark reports, Picard metrics) match nf-core.
+
+---
+
+## 1. Analysis overview
+
+```mermaid
+flowchart TD
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    SS[/"samplesheet<br/>sample, fastq_1, fastq_2, genome"/]:::input
+    REF[/"FASTA (.gz allowed)<br/>optional: .fai, aligner index (directory or .tar.gz)"/]:::input
+
+    subgraph G["1 · Reference preparation (FASTA_INDEX_METHYLSEQ)"]
+        GREF["gunzip FASTA · untar provided index"]:::opt
+        GIDX["build the index of «aligner» · samtools faidx"]:::step
+    end
+
+    subgraph R["2 · Read processing"]
+        CAT["merge runs (cat)"]:::opt
+        FQC["FastQC raw"]:::opt
+        TG["Trim Galore (+ library presets)"]:::opt
+    end
+
+    subgraph B["3a · Bismark route (bismark, bismark_hisat)"]
+        BAL["bismark align (bowtie2 or HISAT2)"]:::step
+        BDD["deduplicate_bismark"]:::opt
+        BMX["bismark_methylation_extractor"]:::out
+        BC2C["coverage2cytosine"]:::opt
+        BREP["bismark2report · bismark2summary"]:::out
+        BSRT["samtools sort / index"]:::step
+    end
+
+    subgraph W["3b · bwa route (bwameth, bwamem)"]
+        WAL["bwameth.py or bwa mem"]:::step
+        WSRT["samtools sort / index / flagstat / stats"]:::step
+        WMD["Picard MarkDuplicates"]:::opt
+        MDK["MethylDackel extract + mbias<br/>(bwameth)"]:::opt
+        RAS["rastair mbias → call → methylKit<br/>(bwamem, or «taps»)"]:::opt
+    end
+
+    subgraph Q["4 · QC and targeted sequencing"]
+        QM["Qualimap · Preseq"]:::opt
+        TS["bedtools intersect with targets ·<br/>sequence dictionary + interval list"]:::opt
+    end
+
+    MQC["MultiQC report<br/>outdir/multiqc/«aligner»/"]:::out
+
+    REF --> GREF --> GIDX
+    SS --> CAT --> FQC
+    CAT --> TG
+    GIDX --> BAL & WAL
+    TG --> BAL --> BDD --> BMX --> BC2C
+    BAL -.->|"skip dedup"| BMX
+    BMX --> BREP
+    BDD --> BSRT
+    TG --> WAL --> WSRT --> WMD --> MDK & RAS
+    WSRT -.->|"skip dedup"| MDK & RAS
+    BSRT & WMD --> QM
+    BMX & MDK --> TS
+    FQC & TG & BREP & WSRT & WMD & QM --> MQC
+```
+
+`aligner` picks exactly one route (3a or 3b). The final BAM that Qualimap, Preseq and the
+methylation callers read is the deduplicated BAM, or the sorted BAM when deduplication is skipped.
+
+---
+
+## 2. Command flow (what each rule runs)
+
+### 2a · Reference preparation (FASTA_INDEX_METHYLSEQ)
+
+```mermaid
+flowchart TD
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    FA[/"«fasta»"/]:::input
+    IDX[/"«bismark_index» / «bwameth_index» / «bwamem_index»"/]:::input
+    FAIIN[/"«fasta_index»"/]:::input
+
+    FR["fetch_remote — any http(s)/ftp input<br/>download into workdir/inputs/"]:::opt
+    GZ["gunzip_fasta<br/>gzip -cd · only if .gz"]:::opt
+    UT["untar_index — index given as .tar.gz<br/>tar -xavf [--strip-components 1]<br/>→ outdir/untar/"]:::opt
+    BGP["bismark_genomepreparation<br/>bismark_genome_preparation --bowtie2 | --hisat2 [--slam if «slamseq»]<br/>bismark, bismark_hisat · unless index given"]:::opt
+    BMI["bwameth_index<br/>bwameth.py index | index-mem2 if «use_mem2»<br/>bwameth · unless index given"]:::opt
+    BWI["bwa_index<br/>bwa index -p genome<br/>bwamem · unless index given"]:::opt
+    FAI["samtools_faidx<br/>samtools faidx<br/>bwameth, bwamem or «collecthsmetrics» · unless «fasta_index»"]:::opt
+    INDEX["aligner index"]:::out
+    FAIO[".fai"]:::out
+
+    FA --> FR --> GZ
+    FA --> GZ
+    FA --> BGP & BMI & BWI & FAI
+    GZ --> BGP & BMI & BWI & FAI
+    IDX --> UT --> INDEX
+    IDX -.->|"directory: used as is"| INDEX
+    BGP & BMI & BWI --> INDEX
+    FAI --> FAIO
+    FAIIN -.->|"used as is"| FAIO
+```
+
+`save_reference: true` writes the built index and `.fai` to `outdir/<aligner>/reference_genome/`
+instead of `workdir/reference/` (bwamem also publishes `BWA_INDEX`'s `versions.yml`, as nf-core
+does).
+
+### 2b · Read processing (CAT_FASTQ, FASTQC, TRIMGALORE)
+
+```mermaid
+flowchart TD
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    SS[/"«input» samplesheet rows"/]:::input
+    CAT["cat_fastq_se / cat_fastq_pe<br/>cat run1 run2 ... → outdir/cat/<br/>only for samples with several rows"]:::opt
+    FQC["fastqc<br/>fastqc «args.fastqc» --threads N --memory (mem / cpus, 100–10000 MB)<br/>unless «skip_fastqc»"]:::opt
+    TG["trimgalore_se / trimgalore_pe<br/>trim_galore --fastqc [--rrbs] [--nextseq «nextseq_trim»] [--length «length_trim»]<br/>[--clip_r1/r2, --three_prime_clip_r1/r2: explicit values or library preset]<br/>--cores (threads − 3 SE / − 4 PE, 1..8) [--paired] --gzip<br/>unless «skip_trimming»"]:::opt
+    TR["trimmed reads<br/>workdir/trimgalore/ (outdir/trimgalore/ if «save_trimmed»)"]:::out
+    LOGS["trimming reports + post-trim FastQC<br/>outdir/trimgalore/{logs,fastqc}/"]:::out
+
+    SS --> CAT --> FQC & TG
+    SS --> FQC & TG
+    TG --> TR & LOGS
+```
+
+For single-end samples, every `*_r2` option is dropped from the Trim Galore arguments (as the
+nf-core module does). With `skip_trimming`, the raw (or merged) reads go straight to the aligner.
+
+### 2c · Bismark route (FASTQ_ALIGN_DEDUP_BISMARK) — `bismark`, `bismark_hisat`
+
+```mermaid
+flowchart TD
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    TR[/"trimmed reads"/]:::input
+    IDX[/"Bismark index"/]:::input
+
+    BAL["bismark_align_se / bismark_align_pe<br/>bismark --genome INDEX --bam --bowtie2 | --hisat2<br/>[--known-splicesite-infile from «known_splices», HISAT2 only]<br/>[--pbat] [--non_directional] [--unmapped] [--score_min L,0,-«num_mismatches»]<br/>[--local] [--minins / --maxins, PE only] [--multicore from cpus and memory]"]:::step
+    BDD["bismark_deduplicate<br/>deduplicate_bismark «args.bismark_deduplicate» -s | -p --bam<br/>unless «skip_deduplication» or «rrbs»"]:::opt
+    BMX["bismark_methylationextractor<br/>bismark_methylation_extractor --bedGraph --counts --gzip --report -s | -p<br/>[--comprehensive] [--cutoff «meth_cutoff»] [--CX if «nomeseq»]<br/>[--ignore / --ignore_3prime R1] [--no_overlap | --include_overlap, --ignore_r2 / --ignore_3prime_r2, PE]<br/>[--multicore threads/3] [--buffer_size]"]:::out
+    C2C["bismark_coverage2cytosine<br/>coverage2cytosine --genome INDEX --gzip [--nome-seq]<br/>if «cytosine_report» or «nomeseq»<br/>→ outdir/bismark/coverage2cytosine/ (also for bismark_hisat)"]:::opt
+    REP["bismark_report<br/>bismark2report «args.bismark_report»<br/>per sample: align + dedup + splitting + M-bias reports"]:::out
+    SUM["bismark_summary<br/>bismark2summary «args.bismark_summary» (all samples)"]:::out
+    SORT["samtools_sort<br/>samtools cat | samtools sort -T prefix"]:::step
+    IX["samtools_index<br/>samtools index"]:::step
+    BAM["final BAM<br/>deduplicated/«id».deduplicated.sorted.bam<br/>or alignments/«id».sorted.bam"]:::out
+
+    TR --> BAL
+    IDX --> BAL & BMX & C2C
+    BAL --> BDD --> BMX
+    BAL -.->|"dedup skipped"| BMX
+    BMX --> C2C
+    BAL & BDD & BMX --> REP --> SUM
+    BDD --> SORT
+    BAL -.->|"dedup skipped"| SORT
+    SORT --> IX --> BAM
+```
+
+`--non_directional` is set by `non_directional`, `single_cell` or `zymo`. `--maxins` is
+`«maxins»`, or 1000 with `em_seq`. Bismark's `--multicore` uses 3 cpus and 13 GB per core
+(5 cpus and 18 GB when non-directional). Per-context call files and `--unmapped` reads depend on
+the data, so they are moved straight to `outdir` and listed in a manifest under `workdir`.
+
+### 2d · bwa route (FASTQ_ALIGN_DEDUP_BWAMETH / _BWAMEM) and methylation calling
+
+```mermaid
+flowchart TD
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    TR[/"trimmed reads"/]:::input
+    IDX[/"bwa-meth or bwa index + FASTA + .fai"/]:::input
+
+    BMA["bwameth_align<br/>bwameth.py «args.bwameth_align» -t N --reference INDEX/genome.fa<br/>| samtools view -bhS<br/>bwameth"]:::opt
+    BWM["bwa_mem<br/>bwa mem «args.bwa_mem» -t N INDEX | samtools sort<br/>bwamem"]:::opt
+    SORT["samtools_sort<br/>samtools cat | samtools sort [--reference FASTA, bwamem]"]:::step
+    IX["samtools_index"]:::step
+    ST["samtools_flagstat · samtools_stats [--reference, bwamem]<br/>· samtools_idxstats (bwamem)<br/>→ alignments/samtools_stats/"]:::out
+    RG["picard_addorreplacereadgroups<br/>picard AddOrReplaceReadGroups «args.picard_addorreplacereadgroups»<br/>bwamem only"]:::opt
+    MD["picard_markduplicates<br/>picard -Xmx(0.8 × mem) MarkDuplicates «args.picard_markduplicates»<br/>→ deduplicated/«id».markdup.sorted.bam<br/>unless «skip_deduplication» (bwameth: or «rrbs»)"]:::opt
+    FIN["final BAM (+ .bai)"]:::out
+    MDE["methyldackel_extract<br/>MethylDackel extract [--CHG --CHH if «all_contexts»] [--mergeContext]<br/>[--ignoreFlags] [--methylKit] [--minDepth «min_depth»]<br/>bwameth, not «taps» → outdir/methyldackel/"]:::opt
+    MDM["methyldackel_mbias<br/>MethylDackel mbias [--CHG --CHH] [--ignoreFlags] --txt"]:::opt
+    RM["rastair_mbias<br/>rastair mbias --fasta-file"]:::opt
+    RP["rastair_mbiasparser<br/>plot_mbias.R · parse_mbias.R → trim CSV"]:::opt
+    RC["rastair_call<br/>rastair call --nOT/--nOB from the CSV"]:::opt
+    RK["rastair_methylkit<br/>rastair_call_to_methylkit.sh | gzip"]:::opt
+
+    TR --> BMA & BWM
+    IDX --> BMA & BWM
+    BMA & BWM --> SORT --> IX --> ST
+    SORT --> RG --> MD
+    SORT -->|"bwameth"| MD
+    MD --> FIN
+    SORT -.->|"dedup skipped"| FIN
+    FIN --> MDE & MDM
+    FIN --> RM --> RP --> RC --> RK
+```
+
+rastair runs for `bwamem`, and for any aligner with `taps: true`, but only when a `.fai` exists
+(bwameth, bwamem or `collecthsmetrics`). This means `taps` with Bismark does nothing unless
+`collecthsmetrics` is on, a quirk kept from nf-core 4.2.0. MethylDackel runs only for `bwameth`
+without `taps`.
+
+### 2e · QC, targeted sequencing and MultiQC
+
+```mermaid
+flowchart TD
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    FIN[/"final BAM"/]:::input
+    BG[/"bedGraphs: Bismark bedGraph.gz,<br/>or MethylDackel CpG/CHG/CHH bedGraphs"/]:::input
+    TB[/"«target_regions_file»"/]:::input
+
+    QM["qualimap_bamqc<br/>qualimap bamqc -p non-strand-specific [--collect-overlap-pairs, PE]<br/>[--gff «bamqc_regions_file»] --java-mem-size 0.8 × mem<br/>if «run_qualimap»"]:::opt
+    PS["preseq_lcextrap<br/>preseq lc_extrap «args.preseq_lcextrap» [-pe]<br/>if «run_preseq» · a failure is ignored (nothing published)"]:::opt
+    BI["bedtools_intersect<br/>bedtools intersect -a bedGraph -b targets «args.bedtools_intersect»<br/>→ «id»...targeted.bedGraph<br/>if «run_targeted_sequencing»"]:::opt
+    DICT["picard_createsequencedictionary<br/>picard CreateSequenceDictionary"]:::opt
+    IL["picard_bedtointervallist<br/>picard BedToIntervalList → enrichment_metrics/<br/>if «run_targeted_sequencing» and «collecthsmetrics»"]:::opt
+    HS["PICARD_COLLECTHSMETRICS<br/>never runs in nf-core 4.2.0 (empty ch_gzi), not run here"]:::opt
+    MQC["multiqc<br/>multiqc --config assets/multiqc_config.yml [--config «multiqc_config»]<br/>[--title «multiqc_title»] [custom_logo «multiqc_logo»]<br/>unless «skip_multiqc» → outdir/multiqc/«aligner»/"]:::out
+
+    FIN --> QM & PS
+    BG --> BI
+    TB --> BI & IL
+    DICT --> IL -.-> HS
+    QM & PS --> MQC
+```
+
+MultiQC collects: FastQC zips, Trim Galore reports, Bismark align / dedup / splitting / M-bias
+reports and the summary (Bismark route), Picard metrics and samtools stats (bwa route), Qualimap
+folders and Preseq logs. Targeted bedGraphs go to `bismark/methylation_calls/bedGraph/` for
+`bismark` and to `methyldackel/` for every other aligner (an nf-core quirk).
+
+---
+
+## 3. How config switches shape the run
+
+Colours: yellow = config key, grey = rules affected.
+
+### 3a · Aligner and reference
+
+```mermaid
+flowchart LR
+    classDef key fill:#fef9c3,stroke:#ca8a04,color:#111
+    classDef rule fill:#f3f4f6,stroke:#6b7280,color:#111
+
+    A{"«aligner»"}:::key -->|bismark| A1["bismark_* rules, bowtie2 index"]:::rule
+    A -->|bismark_hisat| A2["bismark_* rules with --hisat2, HISAT2 index<br/>«known_splices» → splice sites"]:::rule
+    A -->|bwameth| A3["bwameth_align → MarkDuplicates → MethylDackel"]:::rule
+    A -->|bwamem| A4["bwa_mem → read groups → MarkDuplicates → rastair"]:::rule
+    I{"aligner index key"}:::key -->|empty| I1["build the index"]:::rule
+    I -->|".tar.gz"| I2["untar_index → outdir/untar/"]:::rule
+    I -->|directory| I3["use as is"]:::rule
+    F{"«fasta» ends in .gz?"}:::key -->|yes| F1["gunzip_fasta"]:::rule
+    X{"«fasta_index»"}:::key -->|empty and needed| X1["samtools_faidx"]:::rule
+    S{"«save_reference»"}:::key -->|true| S1["index + .fai → «aligner»/reference_genome/"]:::rule
+    G{"«genome» or «use_gpu»"}:::key -->|set| G1["rejected at start-up (not ported)"]:::rule
+```
+
+### 3b · Library presets (Trim Galore clipping and Bismark options)
+
+```mermaid
+flowchart LR
+    classDef key fill:#fef9c3,stroke:#ca8a04,color:#111
+    classDef rule fill:#f3f4f6,stroke:#6b7280,color:#111
+
+    P{"preset"}:::key
+    P -->|«pbat»| P1["clip 8 / 8, 3′ clip 8 / 8 · bismark --pbat"]:::rule
+    P -->|«single_cell»| P2["clip 6 / 6, 3′ clip 6 / 6 · bismark --non_directional"]:::rule
+    P -->|«accel»| P3["clip 10 / 15, 3′ clip 10 / 10"]:::rule
+    P -->|«zymo»| P4["clip 10 / 10, 3′ clip 10 / 10 · bismark --non_directional"]:::rule
+    P -->|«em_seq»| P5["clip 10 / 10, 3′ clip 10 / 10 · bismark --maxins 1000 (PE)"]:::rule
+    P -->|«rrbs»| P6["trim_galore --rrbs · no deduplication (bismark, bwameth)"]:::rule
+    P -->|«taps»| P7["rastair instead of MethylDackel (needs a .fai)"]:::rule
+    P -->|«slamseq»| P8["bismark_genome_preparation --slam"]:::rule
+    O{"«clip_r1» … «three_prime_clip_r2» > 0"}:::key --> O1["explicit value wins over the preset"]:::rule
+    N{"«skip_trimming_presets»"}:::key --> N1["only explicit clip values are used"]:::rule
+```
+
+Clip values are R1 / R2. The first matching preset in the order pbat, single_cell,
+accel/zymo/em_seq wins.
+
+### 3c · Deduplication, methylation calls and optional steps
+
+```mermaid
+flowchart TD
+    classDef key fill:#fef9c3,stroke:#ca8a04,color:#111
+    classDef rule fill:#f3f4f6,stroke:#6b7280,color:#111
+
+    D{"«skip_deduplication»<br/>(or «rrbs», except bwamem)"}:::key
+    D -->|no| D1["bismark: deduplicate_bismark<br/>bwa: Picard MarkDuplicates"]:::rule
+    D -->|yes| D2["sorted BAM is final; Bismark BAMs published under alignments/"]:::rule
+    C{"«cytosine_report» or «nomeseq»"}:::key -->|yes| C1["bismark_coverage2cytosine"]:::rule
+    M{"«methyl_kit»"}:::key -->|yes| M1["MethylDackel writes .methylKit, so no targeted bedGraphs"]:::rule
+    T{"«run_targeted_sequencing»"}:::key -->|yes| T1["bedtools_intersect<br/>needs «target_regions_file»; rejected with «taps» or bwamem"]:::rule
+    H{"«collecthsmetrics»"}:::key -->|yes| H1["samtools_faidx + dictionary + interval list"]:::rule
+    Q{"«run_qualimap»"}:::key -->|yes| Q1["qualimap_bamqc"]:::rule
+    R{"«run_preseq»"}:::key -->|yes| R1["preseq_lcextrap"]:::rule
+    U{"«unmapped»"}:::key -->|yes| U1["bismark --unmapped → alignments/unmapped/"]:::rule
+    SA{"«save_align_intermeds» / «save_trimmed»"}:::key -->|yes| SA1["publish raw alignments / trimmed reads"]:::rule
+    F{"«skip_fastqc» / «skip_trimming» / «skip_multiqc»"}:::key -->|yes| F1["drop fastqc / trimgalore / multiqc"]:::rule
+```
+
+---
+
+## 4. Config key reference
+
+| Key | Rule(s) | Effect on the command |
+|---|---|---|
+| `input` | all per-sample rules | Samplesheet `sample,fastq_1,fastq_2,genome`. Rows with the same `sample` are runs, concatenated by `cat_fastq_*` (all SE or all PE). FASTQs must end in `.fq.gz`/`.fastq.gz`. |
+| `outdir` / `workdir` | all | Published files (mostly `outdir/<aligner>/`) / intermediates (nf-core `work/`). |
+| `fasta` | gunzip_fasta, index rules, samtools_faidx, Picard, MethylDackel, rastair | Genome; `.gz` is unzipped first. Required. |
+| `fasta_index` | samtools_faidx | Given `.fai`; otherwise built when needed (bwameth, bwamem, `collecthsmetrics`). |
+| `bismark_index`, `bwameth_index`, `bwamem_index` | untar_index, index rules | Directory → used; `.tar.gz` → `untar_index` (published to `untar/`); empty → built. |
+| `save_reference` | index rules, samtools_faidx | Write built references to `<aligner>/reference_genome/`. |
+| `aligner` | — | `bismark`, `bismark_hisat`, `bwameth` or `bwamem`; picks the route. |
+| `use_mem2` | bwameth_index | `bwameth.py index-mem2`. |
+| `save_align_intermeds` | bismark_align_*, bwameth_align, bwa_mem, samtools_sort | Publish raw (and, for bwameth, sorted) alignments under `alignments/`. |
+| `unmapped` | bismark_align_* | `--unmapped`; unmapped reads go to `alignments/unmapped/`. |
+| `save_trimmed` | trimgalore_* | Publish trimmed reads to `outdir/trimgalore/`. |
+| `pbat`, `single_cell`, `accel`, `zymo`, `em_seq` | trimgalore_*, bismark_align_* | Preset clipping (figure 3b); `--pbat`, `--non_directional`, `--maxins 1000`. |
+| `rrbs` | trimgalore_*, deduplication | `--rrbs`; turns deduplication off for bismark and bwameth. |
+| `taps` | rastair_* | Use rastair for methylation calls (needs a `.fai`; see 2d). |
+| `slamseq` | bismark_genomepreparation | `--slam`. |
+| `clip_r1`, `clip_r2`, `three_prime_clip_r1`, `three_prime_clip_r2` | trimgalore_* | Explicit clipping; > 0 overrides the preset. R2 options are dropped for SE. |
+| `nextseq_trim`, `length_trim` | trimgalore_* | `--nextseq N` (if > 0), `--length N` (if set). |
+| `skip_trimming_presets` | trimgalore_* | Ignore the library presets. |
+| `trim_OT`, `trim_OB` | — | Kept for completeness: nf-core builds RASTAIR_CALL `ext.args` from them, but the module uses the mbiasparser CSV instead. |
+| `non_directional` | bismark_align_* | `--non_directional`. |
+| `cytosine_report` | bismark_coverage2cytosine | Run coverage2cytosine (CpG report). |
+| `relax_mismatches`, `num_mismatches` | bismark_align_* | `--score_min L,0,-«num_mismatches»`. |
+| `meth_cutoff` | bismark_methylationextractor | `--cutoff N`. |
+| `no_overlap` | bismark_methylationextractor | PE: `--no_overlap` (true) or `--include_overlap` (false). |
+| `ignore_r1`, `ignore_r2`, `ignore_3prime_r1`, `ignore_3prime_r2` | bismark_methylationextractor | `--ignore`, `--ignore_r2`, `--ignore_3prime`, `--ignore_3prime_r2` when > 0 (R2 options PE only). |
+| `known_splices` | bismark_align_* | bismark_hisat: `--known-splicesite-infile` from `hisat2_extract_splice_sites.py`. |
+| `local_alignment` | bismark_align_* | `--local`. |
+| `minins`, `maxins` | bismark_align_pe | `--minins` / `--maxins`. |
+| `nomeseq` | bismark_methylationextractor, bismark_coverage2cytosine | `--CX`; coverage2cytosine `--nome-seq` (CpG and GpC reports). |
+| `comprehensive` | bismark_methylationextractor | `--comprehensive`. |
+| `all_contexts` | methyldackel_* | `--CHG --CHH`; also CHG/CHH outputs. |
+| `merge_context`, `ignore_flags`, `min_depth` | methyldackel_extract (mbias: ignore_flags) | `--mergeContext`, `--ignoreFlags`, `--minDepth N`. |
+| `methyl_kit` | methyldackel_extract | `--methylKit` (`.methylKit` instead of `.bedGraph`). |
+| `skip_trimming`, `skip_deduplication`, `skip_fastqc`, `skip_multiqc` | trimgalore_*, dedup rules, fastqc, multiqc | Turn each step off. |
+| `run_preseq`, `run_qualimap` | preseq_lcextrap, qualimap_bamqc | Turn each step on. |
+| `bamqc_regions_file` | qualimap_bamqc | `--gff FILE`. |
+| `run_targeted_sequencing`, `target_regions_file` | bedtools_intersect | Intersect bedGraphs with the targets (the BED is required). |
+| `collecthsmetrics` | samtools_faidx, picard_createsequencedictionary, picard_bedtointervallist | Dictionary + interval list; HsMetrics itself never runs (nf-core 4.2.0). |
+| `multiqc_config`, `multiqc_title`, `multiqc_logo` | multiqc | Extra `--config`, `--title`, custom logo. |
+| `args.*` | the matching rule | Fixed module arguments (nf-core `ext.args`), e.g. `args.picard_markduplicates`. |
+| `resources.<label>` | every rule | `threads`/`mem_mb` per nf-core label. Memory also sets Picard/Qualimap `-Xmx` (0.8 ×), FastQC `--memory`, Bismark `--multicore` and `--buffer_size`. |
+| `genome`, `use_gpu` | — | **Not ported** (iGenomes, Parabricks). The Snakefile refuses to start if set. |
+
+---
+
+## 5. Exact rule graph
+
+To regenerate the real rule DAG for a config (no jobs are run), from inside `snk-methylseq/`:
+
+```bash
+snakemake --configfile config/test.yaml --rulegraph mermaid-js > rulegraph.mmd
+```
+
+Add `--config aligner=bwameth` (or another aligner) to see the other routes.
+</script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+const md = document.getElementById('src').textContent;
+const renderer = new marked.Renderer();
+const baseCode = renderer.code.bind(renderer);
+renderer.code = function (code, lang) {
+  if (typeof code === 'object') { lang = code.lang; code = code.text; }
+  if (lang === 'mermaid') {
+    const div = document.createElement('div');
+    div.className = 'mermaid';
+    div.textContent = code;
+    return div.outerHTML;
+  }
+  return baseCode.apply(null, arguments);
+};
+document.getElementById('content').innerHTML = marked.parse(md, { renderer });
+mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose',
+                      fontFamily: 'Arial, Helvetica, sans-serif',
+                      flowchart: { htmlLabels: true, useMaxWidth: false, wrappingWidth: 400, padding: 24 } });
+document.addEventListener('click', e => {
+  const d = e.target.closest('.mermaid'); if (d) d.classList.toggle('full');
+});
+mermaid.run({ querySelector: '.mermaid' }).then(() => {
+  console.log('[diagrams] rendered', document.querySelectorAll('.mermaid svg').length, 'of',
+              document.querySelectorAll('.mermaid').length);
+}).catch(e => { console.error('[diagrams] mermaid error', e); });
+</script>
+</body>
+</html>
