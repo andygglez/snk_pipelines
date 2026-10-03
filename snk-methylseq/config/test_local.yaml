@@ -1,0 +1,16 @@
+# Minimal test profile — mirrors nf-core/methylseq 4.2.0 conf/test.config.
+# Usage: snakemake --cores 4 --sdm apptainer --configfile config/test.yaml
+# Offline copy for Rorqual compute nodes (pre-downloaded test data in /scratch/andygg98/claude_jobs/methylseq_testdata/).
+input: "config/samplesheet_local.csv"
+outdir: "results_test"
+workdir: "work_test"
+
+fasta: "/scratch/andygg98/claude_jobs/methylseq_testdata/genome.fa.gz"
+fasta_index: "/scratch/andygg98/claude_jobs/methylseq_testdata/genome.fa.fai"
+
+# test profile: resourceLimits cpus 4, memory 15.GB
+resources:
+  process_single: {threads: 1, mem_mb: 6144}
+  process_low:    {threads: 2, mem_mb: 12288}
+  process_medium: {threads: 4, mem_mb: 15360}
+  process_high:   {threads: 4, mem_mb: 15360}

@@ -1,0 +1,1925 @@
+# =============================================================================
+# snk-methylseq — Snakemake port of nf-core/methylseq 4.2.0
+#
+# Every rule mirrors one nf-core process (named in the comment above each rule)
+# and runs inside the same Singularity image the nf-core module uses
+# (see config/containers.yaml). Published files follow the nf-core publishDir
+# layout under `outdir`; files nf-core keeps only in its work/ directory go to
+# `workdir`.
+#
+# Ported: the whole workflow — CAT_FASTQ, FastQC, Trim Galore, all four
+# aligners (bismark, bismark_hisat, bwameth, bwamem), index building or
+# provided indices (directories or .tar.gz), Bismark deduplication /
+# methylation extraction / coverage2cytosine / reports / summary, Picard
+# MarkDuplicates, MethylDackel, rastair (TAPS), Qualimap, Preseq, the targeted
+# sequencing subworkflow and MultiQC.
+# Not ported (rejected at start-up): iGenomes (`genome`) and the Parabricks
+# GPU aligner (PARABRICKS_FQ2BAMMETH, only used with `-profile gpu`).
+# Not produced: Nextflow run metadata (pipeline_info execution reports and
+# software-version YAMLs, MultiQC workflow summary / versions / methods
+# sections).
+# Kept as in nf-core 4.2.0 (quirks, not fixed here):
+#   - PICARD_COLLECTHSMETRICS never runs: its inputs are combined with an empty
+#     ch_gzi channel. With collecthsmetrics only the sequence dictionary and the
+#     interval list are made.
+#   - rastair (TAPS) needs the FASTA index, which FASTA_INDEX_METHYLSEQ only
+#     provides for bwameth / bwamem or with collecthsmetrics; otherwise --taps
+#     does nothing.
+#   - Targeted bedGraphs go to methyldackel/ for every aligner except
+#     `bismark` (bismark_hisat included).
+#   - Qualimap's and BWA_INDEX's versions.yml are published next to their outputs.
+#   - coverage2cytosine output goes to bismark/coverage2cytosine for bismark_hisat too.
+#   - PRESEQ_LCEXTRAP has errorStrategy 'ignore': a failing preseq publishes
+#     nothing and the run goes on.
+#
+# Rules run in shadow directories with their inputs linked under the file
+# names Nextflow stages, so file names embedded in outputs (BAM @PG lines,
+# samtools stats, Bismark reports, Picard metrics) match nf-core. Files whose
+# names depend on the data (Bismark per-context call files, --unmapped reads)
+# are moved straight to outdir and listed in a manifest under workdir.
+#
+# Run:  snakemake --cores N --sdm apptainer
+# =============================================================================
+
+import csv
+import os
+import re
+import urllib.request
+from collections import OrderedDict
+
+configfile: "config/config.yaml"
+configfile: "config/containers.yaml"
+
+ASSETS = os.path.join(workflow.basedir, "assets")
+
+O = config["outdir"].rstrip("/")
+W = config["workdir"].rstrip("/")
+O_ABS = os.path.abspath(O)
+
+# nextflow.config env{} and process.shell (bash -e -u -o pipefail).
+# HPC hosts (Lmod) export a `which` shell function that leaks into containers
+# and breaks `which` there; drop it. stage() links inputs into the (shadow)
+# working directory under their file names, as Nextflow stages them.
+shell.prefix(
+    "set -euo pipefail; unset -f which 2>/dev/null || true; export PYTHONNOUSERSITE=1 R_PROFILE_USER=/.Rprofile "
+    "R_ENVIRON_USER=/.Renviron JULIA_DEPOT_PATH=/usr/local/share/julia "
+    "MPLCONFIGDIR=${{TMPDIR:-/tmp}}/mplcfg; "
+    'stage() {{ for f in "$@"; do ln -sfn "$(realpath "$f")" "$(basename "$f")"; done; }}; '
+)
+
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def container_path(key):
+    path = config["containers"][key]
+    return path if os.path.isabs(path) else os.path.join(workflow.basedir, path)
+
+
+def asset_path(path):
+    if os.path.isabs(path) or os.path.exists(path):
+        return path
+    return os.path.join(workflow.basedir, path)
+
+
+def res(label):
+    return config["resources"][label]
+
+
+def flag(key):
+    return bool(config.get(key))
+
+
+def param(key):
+    """A nf-core param that defaults to null ("" or missing here -> None)."""
+    value = config.get(key)
+    return None if value in ("", None) else value
+
+
+def num(key):
+    """Groovy numeric param (null -> 0)."""
+    value = param(key)
+    return 0 if value is None else value
+
+
+def args(key):
+    return config["args"][key]
+
+
+def gjoin(parts, sep=" "):
+    """Groovy [..].join(' ').trim()"""
+    return sep.join(parts).strip()
+
+
+def jvm_mem(resources):
+    """avail_mem = (task.memory.mega * 0.8).intValue()"""
+    return int(resources.mem_mb * 0.8)
+
+
+def is_url(path):
+    return str(path).startswith(("http://", "https://", "ftp://"))
+
+
+def basename_noext(path):
+    """Nextflow Path.baseName: file name without its last extension."""
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def alternation(names):
+    names = list(names)
+    return "|".join(re.escape(n) for n in names) if names else "(?!x)x"
+
+
+# Remote inputs (FASTQ / reference URLs) are staged into {W}/inputs/ by
+# fetch_remote, the equivalent of Nextflow's automatic staging of remote files.
+REMOTE = {}
+
+
+def stage(path):
+    if not path or not is_url(path):
+        return path
+    name = os.path.basename(path)
+    if REMOTE.get(name, path) != path:
+        raise ValueError(f"Two remote inputs share the file name {name!r}.")
+    REMOTE[name] = path
+    return f"{W}/inputs/{name}"
+
+
+# -----------------------------------------------------------------------------
+# Parameter validation
+# -----------------------------------------------------------------------------
+ALIGNER = config["aligner"]
+if ALIGNER not in ("bismark", "bismark_hisat", "bwameth", "bwamem"):
+    raise ValueError(
+        f"ERROR: Invalid aligner '{ALIGNER}'. Valid options are: 'bismark', 'bismark_hisat', 'bwameth' or 'bwamem'."
+    )
+if param("genome"):
+    raise ValueError("iGenomes (`genome`) is not ported to snk-methylseq; give `fasta` (and indices) explicitly.")
+if not param("fasta"):
+    raise ValueError("`fasta` is required.")
+if flag("use_gpu"):
+    raise ValueError("The Parabricks GPU aligner (PARABRICKS_FQ2BAMMETH) is not ported.")
+
+BISMARK = ALIGNER in ("bismark", "bismark_hisat")
+BT = "hisat2" if ALIGNER == "bismark_hisat" else "bt2"
+TAPS = flag("taps")
+RRBS = flag("rrbs")
+SKIP_DEDUP_FLAG = flag("skip_deduplication")
+# bismark / bwameth: skip_deduplication || rrbs ; bwamem: skip_deduplication
+SKIP_DEDUP = SKIP_DEDUP_FLAG if ALIGNER == "bwamem" else (SKIP_DEDUP_FLAG or RRBS)
+SAVE_REF = flag("save_reference")
+SAVE_ALIGN = flag("save_align_intermeds")
+SKIP_TRIM = flag("skip_trimming")
+SKIP_FASTQC = flag("skip_fastqc")
+COLLECTHS = flag("collecthsmetrics")
+TARGETED = flag("run_targeted_sequencing")
+SINGLE_CELL_NONDIR = flag("single_cell") or flag("non_directional") or flag("zymo")
+
+if TAPS and ALIGNER != "bwamem":
+    print(
+        "TAPS protocol detected and aligner is not 'bwamem'. We recommend using bwa-mem for TAPS protocol "
+        "as it is optimized for this type of data."
+    )
+if TARGETED:
+    if TAPS or ALIGNER == "bwamem":
+        raise ValueError("ERROR: --run_targeted_sequencing can't be running using rastair (methylation caller for TAPS) ")
+    if not param("target_regions_file"):
+        raise ValueError("ERROR: --target_regions_file must be specified when using --run_targeted_sequencing")
+
+AL = f"{O}/{ALIGNER}"
+REF_DIR = f"{AL}/reference_genome" if SAVE_REF else f"{W}/reference"
+TRIM_DIR = f"{O}/trimgalore" if flag("save_trimmed") else f"{W}/trimgalore"
+
+
+# -----------------------------------------------------------------------------
+# Samplesheet (PIPELINE_INITIALISATION / samplesheetToList / validateInputSamplesheet)
+# -----------------------------------------------------------------------------
+FASTQ_RE = re.compile(r"^([\S\s]*\/)?[^\s\/]+\.f(ast)?q\.gz$")
+
+
+def read_samplesheet(path):
+    samples = OrderedDict()
+    with open(asset_path(path), newline="") as fh:
+        for n, row in enumerate(csv.DictReader(fh), start=2):
+            sid = (row.get("sample") or "").strip()
+            r1 = (row.get("fastq_1") or "").strip()
+            r2 = (row.get("fastq_2") or "").strip()
+            if not sid or re.search(r"\s", sid):
+                raise ValueError(f"Samplesheet line {n}: Sample name must be provided and cannot contain spaces")
+            for r in [r1] + ([r2] if r2 else []):
+                if not FASTQ_RE.match(r):
+                    raise ValueError(
+                        f"Samplesheet line {n}: FastQ file {r!r} must have extension '.fq.gz' or '.fastq.gz'"
+                    )
+            se = not r2
+            entry = samples.setdefault(sid, {"se": se, "runs": []})
+            if entry["se"] != se:
+                raise ValueError(
+                    "Please check input samplesheet -> Multiple runs of a sample must be of the same datatype "
+                    f"i.e. single-end or paired-end: {sid}"
+                )
+            entry["runs"].append([r1] if se else [r1, r2])
+    if not samples:
+        raise ValueError("The samplesheet has no samples.")
+    return samples
+
+
+SAMPLES = read_samplesheet(config["input"])
+IDS = list(SAMPLES)
+SE_IDS = [s for s in IDS if SAMPLES[s]["se"]]
+PE_IDS = [s for s in IDS if not SAMPLES[s]["se"]]
+MULTI_IDS = [s for s in IDS if len(SAMPLES[s]["runs"]) > 1]
+
+
+def is_se(sid):
+    return SAMPLES[sid]["se"]
+
+
+def raw_reads(sid):
+    """Reads after CAT_FASTQ (or the staged inputs of a single-run sample)."""
+    runs = SAMPLES[sid]["runs"]
+    if len(runs) > 1:
+        if is_se(sid):
+            return [f"{O}/cat/{sid}.merged.fastq.gz"]
+        return [f"{O}/cat/{sid}_1.merged.fastq.gz", f"{O}/cat/{sid}_2.merged.fastq.gz"]
+    return [stage(r) for r in runs[0]]
+
+
+for _s in IDS:  # register remote inputs
+    for _run in SAMPLES[_s]["runs"]:
+        for _r in _run:
+            stage(_r)
+
+
+def trimmed_reads(sid):
+    if SKIP_TRIM:
+        return raw_reads(sid)
+    if is_se(sid):
+        return [f"{TRIM_DIR}/{sid}_trimmed.fq.gz"]
+    return [f"{TRIM_DIR}/{sid}_1_val_1.fq.gz", f"{TRIM_DIR}/{sid}_2_val_2.fq.gz"]
+
+
+# -----------------------------------------------------------------------------
+# Reference files (FASTA_INDEX_METHYLSEQ)
+# -----------------------------------------------------------------------------
+FASTA_IN = stage(config["fasta"])
+# ch_fasta meta.id = baseName of the fasta param (genome.fa.gz -> genome.fa)
+FASTA_ID = basename_noext(FASTA_IN)
+if FASTA_IN.endswith(".gz"):  # GUNZIP (publishDir disabled)
+    FASTA = f"{W}/reference/{os.path.basename(FASTA_IN)[:-3]}"
+else:
+    FASTA = FASTA_IN
+FASTA_NAME = os.path.basename(FASTA)
+
+# Indices: provided directory, .tar.gz (UNTAR_*, published to <outdir>/untar), or built.
+UNTAR_SRC = {}  # UNTAR: output dir name -> .tar.gz
+
+
+def provided_index(key):
+    value = param(key)
+    if not value:
+        return None
+    value = stage(value)
+    if value.endswith(".gz"):
+        # UNTAR prefix = meta.id = archive baseName (Bowtie2_Index.tar.gz -> Bowtie2_Index.tar)
+        name = basename_noext(value)
+        UNTAR_SRC[name] = value
+        return f"{O}/untar/{name}"
+    return value
+
+
+if BISMARK:
+    INDEX = provided_index("bismark_index") or f"{REF_DIR}/BismarkIndex"
+elif ALIGNER == "bwameth":
+    INDEX = provided_index("bwameth_index") or f"{REF_DIR}/BwamethIndex"
+else:
+    INDEX = provided_index("bwamem_index") or f"{REF_DIR}/bwa"
+INDEX_NAME = os.path.basename(INDEX.rstrip("/"))
+
+# Fasta index only for bwameth, bwamem or collecthsmetrics (provided one is used as-is)
+HAVE_FAI = ALIGNER in ("bwameth", "bwamem") or COLLECTHS
+if HAVE_FAI:
+    FAI = stage(param("fasta_index")) if param("fasta_index") else f"{REF_DIR}/{FASTA_NAME}.fai"
+else:
+    FAI = None
+
+
+# -----------------------------------------------------------------------------
+# Per-sample file names
+# -----------------------------------------------------------------------------
+def read_stem(path):
+    """Bismark: file name minus .fastq.gz / .fq.gz / .fastq / .fq"""
+    return re.sub(r"(\.fastq\.gz|\.fq\.gz|\.fastq|\.fq)$", "", os.path.basename(path))
+
+
+# ---- Bismark ----
+BAL_DIR = f"{AL}/alignments" if (SAVE_ALIGN or SKIP_DEDUP) else f"{W}/{ALIGNER}/alignments"
+BDEDUP_DIR = f"{W}/{ALIGNER}/deduplicated"
+MC = f"{AL}/methylation_calls"
+STEM2ID = {}
+ALIGN_NAME = {}   # BISMARK_ALIGN bam stem
+ALIGN_REPORT = {}
+for _s in IDS:
+    _stem = read_stem(trimmed_reads(_s)[0])
+    STEM2ID[_stem] = _s
+    ALIGN_NAME[_s] = f"{_stem}_bismark_{BT}" + ("" if is_se(_s) else "_pe")
+    ALIGN_REPORT[_s] = f"{AL}/alignments/logs/{_stem}_bismark_{BT}_{'SE' if is_se(_s) else 'PE'}_report.txt"
+SE_STEMS = [k for k, v in STEM2ID.items() if is_se(v)]
+PE_STEMS = [k for k, v in STEM2ID.items() if not is_se(v)]
+
+
+def bismark_aligned_bam(sid):
+    return f"{BAL_DIR}/{ALIGN_NAME[sid]}.bam"
+
+
+def mex_name(sid):
+    """Stem of the BAM given to the methylation extractor."""
+    return ALIGN_NAME[sid] if SKIP_DEDUP else f"{ALIGN_NAME[sid]}.deduplicated"
+
+
+def mex_bam(sid):
+    return bismark_aligned_bam(sid) if SKIP_DEDUP else f"{BDEDUP_DIR}/{mex_name(sid)}.bam"
+
+
+MEX2ID = {mex_name(s): s for s in IDS} if BISMARK else {}
+DEDUP_REPORT = {s: f"{AL}/deduplicated/logs/{ALIGN_NAME[s]}.deduplication_report.txt" for s in IDS}
+
+# ---- Sorted / final BAMs ----
+if BISMARK:
+    if SKIP_DEDUP:
+        SORTED = {s: f"{AL}/alignments/{s}.sorted.bam" for s in IDS}
+    else:
+        SORTED = {s: f"{AL}/deduplicated/{s}.deduplicated.sorted.bam" for s in IDS}
+    FINAL = dict(SORTED)
+elif ALIGNER == "bwameth":
+    RAW_DIR = f"{AL}/alignments" if SAVE_ALIGN else f"{W}/bwameth/alignments"
+    SORT_DIR = f"{AL}/alignments" if (SKIP_DEDUP or SAVE_ALIGN) else f"{W}/bwameth/sorted"
+    SORTED = {s: f"{SORT_DIR}/{s}.sorted.bam" for s in IDS}
+    FINAL = SORTED if SKIP_DEDUP else {s: f"{AL}/deduplicated/{s}.markdup.sorted.bam" for s in IDS}
+else:  # bwamem
+    RAW_DIR = f"{AL}/alignments" if SAVE_ALIGN else f"{W}/bwamem/alignments"
+    SORT_DIR = f"{AL}/alignments" if SKIP_DEDUP else f"{W}/bwamem/sorted"
+    SORTED = {s: f"{SORT_DIR}/{s}.sorted.bam" for s in IDS}
+    FINAL = SORTED if SKIP_DEDUP else {s: f"{AL}/deduplicated/{s}.markdup.sorted.bam" for s in IDS}
+
+SORTED2ID = {v: k for k, v in SORTED.items()}
+FINAL2ID = {v: k for k, v in FINAL.items()}
+BAM_ID = {}  # every BAM indexed by samtools_index -> sample
+BAM_ID.update(SORTED2ID)
+BAM_ID.update(FINAL2ID)
+
+# ---- MethylDackel ----
+METHYLDACKEL = (not TAPS) and ALIGNER == "bwameth"
+MD_CONTEXTS = ["CpG"] + (["CHG", "CHH"] if flag("all_contexts") else [])
+MD_EXT = "methylKit" if flag("methyl_kit") else "bedGraph"
+
+
+def md_outputs(sid):
+    stem = basename_noext(FINAL[sid])
+    return [f"{O}/methyldackel/{stem}_{c}.{MD_EXT}" for c in MD_CONTEXTS]
+
+
+# ---- rastair (BAM_TAPS_CONVERSION) ----
+RUN_TAPS = (TAPS or ALIGNER == "bwamem") and HAVE_FAI
+
+
+# -----------------------------------------------------------------------------
+# Targets
+# -----------------------------------------------------------------------------
+def bismark_targets(sid):
+    t = [ALIGN_REPORT[sid], SORTED[sid], SORTED[sid] + ".bai"]
+    if SAVE_ALIGN or SKIP_DEDUP:
+        t.append(bismark_aligned_bam(sid))
+    if not SKIP_DEDUP:
+        t.append(DEDUP_REPORT[sid])
+    n = mex_name(sid)
+    t += [
+        f"{MC}/bedGraph/{n}.bedGraph.gz",
+        f"{MC}/methylation_coverage/{n}.bismark.cov.gz",
+        f"{MC}/splitting_report/{n}_splitting_report.txt",
+        f"{MC}/mbias/{n}.M-bias.txt",
+        f"{W}/{ALIGNER}/calls/{n}.txt",
+        bismark_report_html(sid),
+    ]
+    if flag("unmapped"):
+        t.append(f"{W}/{ALIGNER}/unmapped/{ALIGN_NAME[sid]}.txt")
+    if flag("cytosine_report") or flag("nomeseq"):
+        t += c2c_outputs(sid)
+    return t
+
+
+def bismark_report_html(sid):
+    return f"{AL}/reports/" + os.path.basename(ALIGN_REPORT[sid])[: -len(".txt")] + ".html"
+
+
+def c2c_outputs(sid):
+    # conf/modules/bismark_coverage2cytosine.config hardcodes bismark/ (also for bismark_hisat)
+    d = f"{O}/bismark/coverage2cytosine"
+    if flag("nomeseq"):
+        return [
+            f"{d}/summaries/{sid}.cytosine_context_summary.txt",
+            f"{d}/reports/{sid}.NOMe.CpG_report.txt.gz",
+            f"{d}/reports/{sid}.NOMe.GpC_report.txt.gz",
+            f"{d}/coverage/{sid}.NOMe.CpG.cov.gz",
+            f"{d}/coverage/{sid}.NOMe.GpC.cov.gz",
+        ]
+    return [f"{d}/summaries/{sid}.cytosine_context_summary.txt", f"{d}/reports/{sid}.CpG_report.txt.gz"]
+
+
+STATS_DIR = f"{AL}/alignments/samtools_stats"
+
+
+def align_stats(sid):
+    t = [f"{STATS_DIR}/{sid}.flagstat", f"{STATS_DIR}/{sid}.stats"]
+    if ALIGNER == "bwamem":
+        t.append(f"{STATS_DIR}/{sid}.idxstats")
+    return t
+
+
+def picard_metrics(sid):
+    return f"{AL}/deduplicated/picard_metrics/{sid}.markdup.sorted.MarkDuplicates.metrics.txt"
+
+
+def bwa_targets(sid):
+    t = align_stats(sid)
+    if SAVE_ALIGN:
+        t.append(f"{RAW_DIR}/{sid}.bam")
+    if SORT_DIR == f"{AL}/alignments":
+        t += [SORTED[sid], SORTED[sid] + ".bai"]
+    if not SKIP_DEDUP:
+        t += [FINAL[sid], FINAL[sid] + ".bai", picard_metrics(sid)]
+    return t
+
+
+def fastqc_outputs(sid):
+    names = [sid] if is_se(sid) else [f"{sid}_1", f"{sid}_2"]
+    return [f"{O}/fastqc/{n}_fastqc.html" for n in names] + [f"{O}/fastqc/zips/{n}_fastqc.zip" for n in names]
+
+
+def trim_reports(sid):
+    if is_se(sid):
+        return [f"{O}/trimgalore/logs/{sid}.fastq.gz_trimming_report.txt"]
+    return [f"{O}/trimgalore/logs/{sid}_{i}.fastq.gz_trimming_report.txt" for i in (1, 2)]
+
+
+def trim_fastqc(sid):
+    names = [f"{sid}_trimmed"] if is_se(sid) else [f"{sid}_1_val_1", f"{sid}_2_val_2"]
+    return [f"{O}/trimgalore/fastqc/{n}_fastqc.html" for n in names] + [
+        f"{O}/trimgalore/fastqc/zips/{n}_fastqc.zip" for n in names
+    ]
+
+
+def rastair_outputs(sid):
+    return [
+        f"{O}/rastair/mbias/{sid}.rastair_mbias.txt",
+        f"{O}/rastair/mbiasparser/{sid}.rastair_mbias_processed.csv",
+        f"{O}/rastair/call/{sid}.rastair_call.txt",
+        f"{O}/rastair/methylkit/{sid}.rastair_methylkit.txt.gz",
+    ]
+
+
+# Targeted sequencing: BEDTOOLS_INTERSECT per bedGraph (prefix = bedGraph baseName)
+TARGET_SRC = {}  # output -> bedGraph
+if TARGETED:
+    _tdir = f"{MC}/bedGraph" if ALIGNER == "bismark" else f"{O}/methyldackel"
+    for _s in IDS:
+        if BISMARK:
+            _bgs = [f"{MC}/bedGraph/{mex_name(_s)}.bedGraph.gz"]
+        elif METHYLDACKEL and MD_EXT == "bedGraph":
+            _bgs = md_outputs(_s)
+        else:
+            _bgs = []
+        for _bg in _bgs:
+            TARGET_SRC[f"{_tdir}/{basename_noext(_bg)}.targeted.bedGraph"] = _bg
+TARGET_BED = asset_path(stage(param("target_regions_file"))) if TARGETED else None
+DICT = f"{REF_DIR}/{FASTA_ID}.dict"
+INTERVALLIST = (
+    f"{O}/enrichment_metrics/{basename_noext(TARGET_BED)}.intervallist" if (TARGETED and COLLECTHS) else None
+)
+
+MULTIQC_DIR = f"{O}/multiqc/{ALIGNER}"
+
+
+def all_targets():
+    t = []
+    for s in IDS:
+        if not SKIP_FASTQC:
+            t += fastqc_outputs(s)
+        if not SKIP_TRIM:
+            t += trim_reports(s) + trim_fastqc(s) + trimmed_reads(s)
+        if s in MULTI_IDS:
+            t += raw_reads(s)
+        t += bismark_targets(s) if BISMARK else bwa_targets(s)
+        if METHYLDACKEL:
+            t += md_outputs(s) + [f"{O}/methyldackel/mbias/{s}.mbias.txt"]
+        if RUN_TAPS:
+            t += rastair_outputs(s)
+        if flag("run_qualimap"):
+            t.append(f"{AL}/qualimap/bamqc/{s}")
+        if flag("run_preseq"):
+            t.append(f"{W}/preseq/{s}.done")
+    if BISMARK:
+        t += [f"{AL}/summary/bismark_summary_report.txt", f"{AL}/summary/bismark_summary_report.html"]
+    if flag("run_qualimap"):
+        t.append(f"{AL}/qualimap/bamqc/versions.yml")
+    t += list(TARGET_SRC)
+    if INTERVALLIST:
+        t.append(INTERVALLIST)
+    if SAVE_REF:
+        t += built_reference()
+    t += [f"{O}/untar/{n}" for n in UNTAR_SRC]
+    if not flag("skip_multiqc"):
+        t.append(f"{MULTIQC_DIR}/multiqc_report.html")
+    return t
+
+
+def built_reference():
+    """Reference files published with save_reference."""
+    t = []
+    if INDEX.startswith(REF_DIR):
+        t.append(INDEX)
+        if ALIGNER == "bwamem":
+            t.append(f"{REF_DIR}/versions.yml")
+    if FAI and FAI.startswith(REF_DIR):
+        t.append(FAI)
+    if TARGETED and COLLECTHS:
+        t.append(DICT)
+    return t
+
+
+rule all:
+    input:
+        all_targets(),
+
+
+# -----------------------------------------------------------------------------
+# Remote inputs
+# -----------------------------------------------------------------------------
+rule fetch_remote:
+    output:
+        f"{W}/inputs/{{fname}}",
+    wildcard_constraints:
+        fname=alternation(REMOTE),
+    params:
+        url=lambda wc: REMOTE[wc.fname],
+    retries: 2
+    run:
+        import shutil
+
+        with urllib.request.urlopen(params.url) as src, open(output[0], "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
+# -----------------------------------------------------------------------------
+# Reference preparation (FASTA_INDEX_METHYLSEQ)
+# -----------------------------------------------------------------------------
+# GUNZIP (publishDir enabled: false)
+rule gunzip_fasta:
+    input:
+        FASTA_IN,
+    output:
+        f"{W}/reference/{FASTA_NAME}",
+    container:
+        container_path("coreutils")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shell:
+        "gzip -cd {input} > {output}"
+
+
+# UNTAR_BISMARK / UNTAR_BWAMETH (default publishDir: <outdir>/untar)
+rule untar_index:
+    input:
+        lambda wc: UNTAR_SRC[wc.name],
+    output:
+        directory(f"{O}/untar/{{name}}"),
+    wildcard_constraints:
+        name=alternation(UNTAR_SRC),
+    container:
+        container_path("coreutils")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        archive=$(basename {input})
+        mkdir {wildcards.name}
+        ## Ensures --strip-components only applied when top level of tar contents is a directory
+        if [[ $(tar -taf $archive | grep -o -P "^.*?\\/" | uniq | wc -l) -eq 1 ]]; then
+            tar -C {wildcards.name} --strip-components 1 -xavf $archive
+        else
+            tar -C {wildcards.name} -xavf $archive
+        fi
+        mv {wildcards.name} {output}
+        """
+
+
+# SAMTOOLS_FAIDX (published to <aligner>/reference_genome with save_reference)
+rule samtools_faidx:
+    input:
+        FASTA,
+    output:
+        f"{REF_DIR}/{FASTA_NAME}.fai",
+    container:
+        container_path("samtools")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        samtools faidx {FASTA_NAME}
+        mv {FASTA_NAME}.fai {output}
+        """
+
+
+# BISMARK_GENOMEPREPARATION_BOWTIE / _HISAT
+rule bismark_genomepreparation:
+    input:
+        FASTA,
+    output:
+        directory(f"{REF_DIR}/BismarkIndex"),
+    params:
+        args=gjoin([" --hisat2" if ALIGNER == "bismark_hisat" else " --bowtie2", " --slam" if flag("slamseq") else ""]),
+        # the published index holds a copy of the FASTA; the work copy a link
+        put_fasta="cp -L" if SAVE_REF else "ln -s",
+    container:
+        container_path("bismark")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        mkdir BismarkIndex
+        {params.put_fasta} "$(realpath {input})" BismarkIndex/{FASTA_NAME}
+        bismark_genome_preparation {params.args} BismarkIndex
+        mv BismarkIndex {output}
+        """
+
+
+# BWAMETH_INDEX (the FASTA is staged in BwamethIndex/ and removed afterwards)
+rule bwameth_index:
+    input:
+        FASTA,
+    output:
+        directory(f"{REF_DIR}/BwamethIndex"),
+    params:
+        cmd="index-mem2" if flag("use_mem2") else "index",
+    container:
+        container_path("bwameth")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        mkdir BwamethIndex
+        ln -s "$(realpath {input})" BwamethIndex/{FASTA_NAME}
+        bwameth.py {params.cmd} BwamethIndex/{FASTA_NAME}
+        rm BwamethIndex/{FASTA_NAME}
+        mv BwamethIndex {output}
+        """
+
+
+# BWA_INDEX (prefix = fasta baseName)
+rule bwa_index:
+    input:
+        FASTA,
+    output:
+        directory(f"{REF_DIR}/bwa"),
+    params:
+        prefix=basename_noext(FASTA),
+    container:
+        container_path("bwa")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        mkdir bwa
+        bwa index -p bwa/{params.prefix} {FASTA_NAME}
+        mv bwa {output}
+        """
+
+
+# BWA_INDEX versions.yml (its publishDir pattern "*" has no versions.yml filter)
+rule bwa_index_versions:
+    output:
+        f"{REF_DIR}/versions.yml",
+    container:
+        container_path("bwa")
+    shell:
+        """
+        cat <<-END_VERSIONS > {output}
+"NFCORE_METHYLSEQ:FASTA_INDEX_METHYLSEQ:BWA_INDEX":
+    bwa: $(echo $(bwa 2>&1) | sed 's/^.*Version: //; s/Contact:.*$//')
+END_VERSIONS
+        """
+
+
+# -----------------------------------------------------------------------------
+# Reads: CAT_FASTQ, FASTQC, TRIMGALORE
+# -----------------------------------------------------------------------------
+def run_files(sid):
+    return [stage(r) for run in SAMPLES[sid]["runs"] for r in run]
+
+
+# CAT_FASTQ (single-end; default publishDir: <outdir>/cat)
+rule cat_fastq_se:
+    input:
+        lambda wc: run_files(wc.id),
+    output:
+        f"{O}/cat/{{id}}.merged.fastq.gz",
+    wildcard_constraints:
+        id=alternation(s for s in MULTI_IDS if is_se(s)),
+    container:
+        container_path("coreutils")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shell:
+        "cat {input} > {output}"
+
+
+# CAT_FASTQ (paired-end: reads are interleaved R1,R2,R1,R2,...)
+rule cat_fastq_pe:
+    input:
+        r1=lambda wc: run_files(wc.id)[0::2],
+        r2=lambda wc: run_files(wc.id)[1::2],
+    output:
+        r1=f"{O}/cat/{{id}}_1.merged.fastq.gz",
+        r2=f"{O}/cat/{{id}}_2.merged.fastq.gz",
+    wildcard_constraints:
+        id=alternation(s for s in MULTI_IDS if not is_se(s)),
+    container:
+        container_path("coreutils")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shell:
+        """
+        cat {input.r1} > {output.r1}
+        cat {input.r2} > {output.r2}
+        """
+
+
+def fastqc_memory(threads, resources):
+    """task.memory MB / cpus, clamped to 100..10000"""
+    mb = resources.mem_mb / threads
+    mb = 10000 if mb > 10000 else (100 if mb < 100 else mb)
+    return int(mb) if float(mb).is_integer() else mb
+
+
+# FASTQC (reads renamed to <id>.gz / <id>_{1,2}.gz as the module does)
+rule fastqc:
+    input:
+        lambda wc: raw_reads(wc.name if wc.name in SE_IDS else wc.name[:-2]),
+    output:
+        html=f"{O}/fastqc/{{name}}_fastqc.html",
+        zip=f"{O}/fastqc/zips/{{name}}_fastqc.zip",
+    wildcard_constraints:
+        name=alternation(SE_IDS + [f"{s}_{i}" for s in PE_IDS for i in (1, 2)]),
+    params:
+        args=args("fastqc"),
+        memory=lambda wc, threads, resources: fastqc_memory(threads, resources),
+        src=lambda wc, input: input[0] if wc.name in SE_IDS else input[int(wc.name[-1]) - 1],
+    container:
+        container_path("fastqc")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {params.src}
+        ln -s $(basename {params.src}) {wildcards.name}.gz
+        fastqc {params.args} --threads {threads} --memory {params.memory} {wildcards.name}.gz
+        mv {wildcards.name}_fastqc.html {output.html}
+        mv {wildcards.name}_fastqc.zip {output.zip}
+        """
+
+
+def trimgalore_args(se):
+    """TRIMGALORE ext.args (conf/modules/trimgalore.config)"""
+    p = flag
+    presets = not p("skip_trimming_presets")
+    clip_r1 = (
+        f"--clip_r1 {config['clip_r1']}" if num("clip_r1") > 0 else
+        "" if not presets else
+        "--clip_r1 8" if p("pbat") else
+        "--clip_r1 6" if p("single_cell") else
+        "--clip_r1 10" if (p("accel") or p("zymo") or p("em_seq")) else ""
+    )
+    clip_r2 = "" if se else (
+        f"--clip_r2 {config['clip_r2']}" if num("clip_r2") > 0 else
+        "" if not presets else
+        "--clip_r2 8" if p("pbat") else
+        "--clip_r2 6" if p("single_cell") else
+        "--clip_r2 10" if (p("zymo") or p("em_seq")) else
+        "--clip_r2 15" if p("accel") else ""
+    )
+    tp_r1 = (
+        f"--three_prime_clip_r1 {config['three_prime_clip_r1']}" if num("three_prime_clip_r1") > 0 else
+        "" if not presets else
+        "--three_prime_clip_r1 8" if p("pbat") else
+        "--three_prime_clip_r1 6" if p("single_cell") else
+        "--three_prime_clip_r1 10" if (p("accel") or p("zymo") or p("em_seq")) else ""
+    )
+    tp_r2 = "" if se else (
+        f"--three_prime_clip_r2 {config['three_prime_clip_r2']}" if num("three_prime_clip_r2") > 0 else
+        "" if not presets else
+        "--three_prime_clip_r2 8" if p("pbat") else
+        "--three_prime_clip_r2 6" if p("single_cell") else
+        "--three_prime_clip_r2 10" if (p("accel") or p("zymo") or p("em_seq")) else ""
+    )
+    a = gjoin([
+        "--fastqc",
+        "--rrbs" if RRBS else "",
+        f"--nextseq {config['nextseq_trim']}" if num("nextseq_trim") > 0 else "",
+        f"--length {config['length_trim']}" if param("length_trim") else "",
+        clip_r1, clip_r2, tp_r1, tp_r2,
+    ])
+    if se:  # args.split("\\s(?=--)"), drop the *_r2 options
+        parts = re.split(r"\s(?=--)", a)
+        a = " ".join(x for x in parts if "_r2 " not in x.lower())
+    return a
+
+
+def trimgalore_cores(threads, se):
+    cores = threads - (3 if se else 4)
+    return min(max(cores, 1), 8)
+
+
+# TRIMGALORE (single-end)
+rule trimgalore_se:
+    input:
+        lambda wc: raw_reads(wc.id),
+    output:
+        reads=f"{TRIM_DIR}/{{id}}_trimmed.fq.gz",
+        log=f"{O}/trimgalore/logs/{{id}}.fastq.gz_trimming_report.txt",
+        html=f"{O}/trimgalore/fastqc/{{id}}_trimmed_fastqc.html",
+        zip=f"{O}/trimgalore/fastqc/zips/{{id}}_trimmed_fastqc.zip",
+    wildcard_constraints:
+        id=alternation(SE_IDS),
+    params:
+        args=trimgalore_args(True),
+        cores=lambda wc, threads: trimgalore_cores(threads, True),
+    container:
+        container_path("trimgalore")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        [ ! -f {wildcards.id}.fastq.gz ] && ln -s $(basename {input}) {wildcards.id}.fastq.gz
+        trim_galore {params.args} --cores {params.cores} --gzip {wildcards.id}.fastq.gz
+        mv {wildcards.id}_trimmed.fq.gz {output.reads}
+        mv {wildcards.id}.fastq.gz_trimming_report.txt {output.log}
+        mv {wildcards.id}_trimmed_fastqc.html {output.html}
+        mv {wildcards.id}_trimmed_fastqc.zip {output.zip}
+        """
+
+
+# TRIMGALORE (paired-end)
+rule trimgalore_pe:
+    input:
+        lambda wc: raw_reads(wc.id),
+    output:
+        r1=f"{TRIM_DIR}/{{id}}_1_val_1.fq.gz",
+        r2=f"{TRIM_DIR}/{{id}}_2_val_2.fq.gz",
+        log1=f"{O}/trimgalore/logs/{{id}}_1.fastq.gz_trimming_report.txt",
+        log2=f"{O}/trimgalore/logs/{{id}}_2.fastq.gz_trimming_report.txt",
+        html1=f"{O}/trimgalore/fastqc/{{id}}_1_val_1_fastqc.html",
+        html2=f"{O}/trimgalore/fastqc/{{id}}_2_val_2_fastqc.html",
+        zip1=f"{O}/trimgalore/fastqc/zips/{{id}}_1_val_1_fastqc.zip",
+        zip2=f"{O}/trimgalore/fastqc/zips/{{id}}_2_val_2_fastqc.zip",
+    wildcard_constraints:
+        id=alternation(PE_IDS),
+    params:
+        args=trimgalore_args(False),
+        cores=lambda wc, threads: trimgalore_cores(threads, False),
+        r1=lambda wc, input: os.path.basename(input[0]),
+        r2=lambda wc, input: os.path.basename(input[1]),
+    container:
+        container_path("trimgalore")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        [ ! -f {wildcards.id}_1.fastq.gz ] && ln -s {params.r1} {wildcards.id}_1.fastq.gz
+        [ ! -f {wildcards.id}_2.fastq.gz ] && ln -s {params.r2} {wildcards.id}_2.fastq.gz
+        trim_galore {params.args} --cores {params.cores} --paired --gzip \
+            {wildcards.id}_1.fastq.gz {wildcards.id}_2.fastq.gz
+        mv {wildcards.id}_1_val_1.fq.gz {output.r1}
+        mv {wildcards.id}_2_val_2.fq.gz {output.r2}
+        mv {wildcards.id}_1.fastq.gz_trimming_report.txt {output.log1}
+        mv {wildcards.id}_2.fastq.gz_trimming_report.txt {output.log2}
+        mv {wildcards.id}_1_val_1_fastqc.html {output.html1}
+        mv {wildcards.id}_2_val_2_fastqc.html {output.html2}
+        mv {wildcards.id}_1_val_1_fastqc.zip {output.zip1}
+        mv {wildcards.id}_2_val_2_fastqc.zip {output.zip2}
+        """
+
+
+# -----------------------------------------------------------------------------
+# Bismark (FASTQ_ALIGN_DEDUP_BISMARK)
+# -----------------------------------------------------------------------------
+def bismark_align_args(se):
+    """BISMARK_ALIGN ext.args (conf/modules/bismark_align.config)"""
+    known = param("known_splices")
+    maxins = ""
+    if not se:
+        if param("maxins"):
+            maxins = f" --maxins {config['maxins']}"
+        elif flag("em_seq"):
+            maxins = " --maxins 1000"
+    return gjoin([
+        " --hisat2" if ALIGNER == "bismark_hisat" else " --bowtie2",
+        f" --known-splicesite-infile <(hisat2_extract_splice_sites.py {os.path.abspath(known)})"
+        if (ALIGNER == "bismark_hisat" and known) else "",
+        " --pbat" if flag("pbat") else "",
+        " --non_directional" if SINGLE_CELL_NONDIR else "",
+        " --unmapped" if flag("unmapped") else "",
+        f" --score_min L,0,-{config['num_mismatches']}" if flag("relax_mismatches") else "",
+        " --local" if flag("local_alignment") else "",
+        f" --minins {config['minins']}" if (not se and param("minins")) else "",
+        maxins,
+    ])
+
+
+def bismark_multicore(a, threads, resources):
+    """BISMARK_ALIGN: --multicore from cpus (3 per core, 5 if non-directional) and memory (13/18 GB per core)."""
+    if "--multicore" in a:
+        return a
+    cpu_per, mem_per = (5, 18 * 1024**3) if "--non_directional" in a else (3, 13 * 1024**3)
+    ccore = min(threads // cpu_per, int(resources.mem_mb * 1024**2 / mem_per))
+    return a + (f" --multicore {ccore}" if ccore > 1 else "")
+
+
+BISMARK_ALIGN_CMD = """
+        stage {input.reads}
+        ln -sfn "$(realpath {input.index})" {INDEX_NAME}
+        bismark {params.fastq} --genome {INDEX_NAME} --bam {params.args}
+        mv {params.name}.bam {output.bam}
+        mv {params.rep} {output.rep}
+        if [ -n "{params.unmapped_dir}" ]; then
+            mkdir -p {params.unmapped_dir}
+            ls *_unmapped_reads*.fq.gz > {output.manifest}
+            mv *_unmapped_reads*.fq.gz {params.unmapped_dir}/
+        else
+            touch {output.manifest}
+        fi
+"""
+
+
+def bismark_align_outputs(se):
+    suffix = "" if se else "_pe"
+    return dict(
+        bam=f"{BAL_DIR}/{{stem}}_bismark_{BT}{suffix}.bam",
+        rep=f"{AL}/alignments/logs/{{stem}}_bismark_{BT}_{'SE' if se else 'PE'}_report.txt",
+        manifest=f"{W}/{ALIGNER}/unmapped/{{stem}}_bismark_{BT}{suffix}.txt",
+    )
+
+
+BISMARK_UNMAPPED_DIR = f"{O_ABS}/{ALIGNER}/alignments/unmapped" if flag("unmapped") else ""
+
+
+# BISMARK_ALIGN (single-end)
+rule bismark_align_se:
+    input:
+        reads=lambda wc: trimmed_reads(STEM2ID[wc.stem]),
+        index=INDEX,
+    output:
+        **bismark_align_outputs(True),
+    wildcard_constraints:
+        stem=alternation(SE_STEMS),
+    params:
+        fastq=lambda wc, input: os.path.basename(input.reads[0]),
+        args=lambda wc, threads, resources: bismark_multicore(bismark_align_args(True), threads, resources),
+        name=lambda wc: f"{wc.stem}_bismark_{BT}",
+        rep=lambda wc: f"{wc.stem}_bismark_{BT}_SE_report.txt",
+        unmapped_dir=BISMARK_UNMAPPED_DIR,
+    container:
+        container_path("bismark")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        BISMARK_ALIGN_CMD
+
+
+# BISMARK_ALIGN (paired-end)
+rule bismark_align_pe:
+    input:
+        reads=lambda wc: trimmed_reads(STEM2ID[wc.stem]),
+        index=INDEX,
+    output:
+        **bismark_align_outputs(False),
+    wildcard_constraints:
+        stem=alternation(PE_STEMS),
+    params:
+        fastq=lambda wc, input: "-1 {} -2 {}".format(*[os.path.basename(r) for r in input.reads]),
+        args=lambda wc, threads, resources: bismark_multicore(bismark_align_args(False), threads, resources),
+        name=lambda wc: f"{wc.stem}_bismark_{BT}_pe",
+        rep=lambda wc: f"{wc.stem}_bismark_{BT}_PE_report.txt",
+        unmapped_dir=BISMARK_UNMAPPED_DIR,
+    container:
+        container_path("bismark")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        BISMARK_ALIGN_CMD
+
+
+# BISMARK_DEDUPLICATE
+rule bismark_deduplicate:
+    input:
+        f"{BAL_DIR}/{{name}}.bam",
+    output:
+        bam=f"{BDEDUP_DIR}/{{name}}.deduplicated.bam",
+        rep=f"{AL}/deduplicated/logs/{{name}}.deduplication_report.txt",
+    wildcard_constraints:
+        name=alternation(ALIGN_NAME.values()),
+    params:
+        args=args("bismark_deduplicate"),
+        seqtype=lambda wc: "-s" if wc.name.endswith(f"_bismark_{BT}") else "-p",
+    container:
+        container_path("bismark")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        deduplicate_bismark {params.args} {params.seqtype} --bam {wildcards.name}.bam
+        mv {wildcards.name}.deduplicated.bam {output.bam}
+        mv {wildcards.name}.deduplication_report.txt {output.rep}
+        """
+
+
+def mex_args(sid, threads, resources):
+    """BISMARK_METHYLATIONEXTRACTOR ext.args + module multicore / buffer_size"""
+    se = is_se(sid)
+    a = gjoin([
+        " --comprehensive" if flag("comprehensive") else "",
+        f" --cutoff {config['meth_cutoff']}" if param("meth_cutoff") else "",
+        "--CX" if flag("nomeseq") else "",
+        f"--ignore {config['ignore_r1']}" if num("ignore_r1") > 0 else "",
+        f"--ignore_3prime {config['ignore_3prime_r1']}" if num("ignore_3prime_r1") > 0 else "",
+        "" if se else (" --no_overlap" if flag("no_overlap") else "--include_overlap"),
+        "" if se else (f"--ignore_r2 {config['ignore_r2']}" if num("ignore_r2") > 0 else ""),
+        "" if se else (f"--ignore_3prime_r2 {config['ignore_3prime_r2']}" if num("ignore_3prime_r2") > 0 else ""),
+    ])
+    if "--multicore" not in a and threads >= 6:
+        a += f" --multicore {threads // 3}"
+    giga = resources.mem_mb // 1024
+    if "--buffer_size" not in a and giga > 6:
+        a += f" --buffer_size {giga - 2}G"
+    return a
+
+
+# BISMARK_METHYLATIONEXTRACTOR (input: deduplicated, or aligned with skip_deduplication / rrbs)
+rule bismark_methylationextractor:
+    input:
+        bam=lambda wc: mex_bam(MEX2ID[wc.name]),
+        index=INDEX,
+    output:
+        bedgraph=f"{MC}/bedGraph/{{name}}.bedGraph.gz",
+        coverage=f"{MC}/methylation_coverage/{{name}}.bismark.cov.gz",
+        rep=f"{MC}/splitting_report/{{name}}_splitting_report.txt",
+        mbias=f"{MC}/mbias/{{name}}.M-bias.txt",
+        calls=f"{W}/{ALIGNER}/calls/{{name}}.txt",
+    wildcard_constraints:
+        name=alternation(MEX2ID),
+    params:
+        args=lambda wc, threads, resources: mex_args(MEX2ID[wc.name], threads, resources),
+        seqtype=lambda wc: "-s" if is_se(MEX2ID[wc.name]) else "-p",
+        calls_dir=f"{O_ABS}/{ALIGNER}/methylation_calls/methylation_calls",
+    container:
+        container_path("bismark")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input.bam}
+        ln -sfn "$(realpath {input.index})" {INDEX_NAME}
+        bismark_methylation_extractor {wildcards.name}.bam --bedGraph --counts --gzip --report \
+            {params.seqtype} {params.args}
+        mv {wildcards.name}.bedGraph.gz {output.bedgraph}
+        mv {wildcards.name}.bismark.cov.gz {output.coverage}
+        mv {wildcards.name}_splitting_report.txt {output.rep}
+        mv {wildcards.name}.M-bias.txt {output.mbias}
+        # per-context call files (which exist depends on the data): published as *txt.gz
+        mkdir -p {params.calls_dir}
+        ls *.txt.gz > {output.calls}
+        mv *.txt.gz {params.calls_dir}/
+        """
+
+
+# BISMARK_COVERAGE2CYTOSINE (cytosine_report or nomeseq)
+rule bismark_coverage2cytosine:
+    input:
+        coverage=lambda wc: f"{MC}/methylation_coverage/{mex_name(wc.id)}.bismark.cov.gz",
+        fasta=FASTA,
+        index=INDEX,
+    output:
+        c2c_outputs("{id}"),
+    wildcard_constraints:
+        id=alternation(IDS),
+    params:
+        args="--nome-seq" if flag("nomeseq") else "",
+        dir=f"{O}/bismark/coverage2cytosine",
+    container:
+        container_path("bismark")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input.coverage}
+        mkdir -p tmp && ln -sfn "$(realpath {input.fasta})" tmp/{FASTA_NAME}
+        ln -sfn "$(realpath {input.index})" {INDEX_NAME}
+        coverage2cytosine $(basename {input.coverage}) --genome {INDEX_NAME} --output {wildcards.id} \
+            --gzip {params.args}
+        mkdir -p {params.dir}/coverage
+        for f in {output}; do mv $(basename $f) $f; done
+        """
+
+
+def bismark_report_inputs(wc):
+    sid = next(s for s in IDS if os.path.basename(ALIGN_REPORT[s]) == f"{wc.rname}_report.txt")
+    n = mex_name(sid)
+    d = dict(
+        align=ALIGN_REPORT[sid],
+        splitting=f"{MC}/splitting_report/{n}_splitting_report.txt",
+        mbias=f"{MC}/mbias/{n}.M-bias.txt",
+    )
+    if not SKIP_DEDUP:
+        d["dedup"] = DEDUP_REPORT[sid]
+    return d
+
+
+# BISMARK_REPORT
+rule bismark_report:
+    input:
+        unpack(bismark_report_inputs),
+    output:
+        f"{AL}/reports/{{rname}}_report.html",
+    wildcard_constraints:
+        rname=alternation(os.path.basename(ALIGN_REPORT[s])[: -len("_report.txt")] for s in IDS) if BISMARK else "(?!x)x",
+    params:
+        args=args("bismark_report"),
+    container:
+        container_path("bismark")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        bismark2report {params.args}
+        mv {wildcards.rname}_report.html {output}
+        """
+
+
+def bismark_summary_inputs(wc):
+    files = []
+    for s in IDS:
+        n = mex_name(s)
+        files += [ALIGN_REPORT[s], f"{MC}/splitting_report/{n}_splitting_report.txt", f"{MC}/mbias/{n}.M-bias.txt"]
+        if not SKIP_DEDUP:
+            files.append(DEDUP_REPORT[s])
+    return files
+
+
+# BISMARK_SUMMARY (bam names of BISMARK_ALIGN; Nextflow collects them in completion order, sorted here)
+rule bismark_summary:
+    input:
+        bismark_summary_inputs,
+    output:
+        txt=f"{AL}/summary/bismark_summary_report.txt",
+        html=f"{AL}/summary/bismark_summary_report.html",
+    params:
+        bams=" ".join(sorted(f"{ALIGN_NAME[s]}.bam" for s in IDS)) if BISMARK else "",
+    container:
+        container_path("bismark")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        bismark2summary {params.bams}
+        mv bismark_summary_report.txt {output.txt}
+        mv bismark_summary_report.html {output.html}
+        """
+
+
+# -----------------------------------------------------------------------------
+# bwa-meth (FASTQ_ALIGN_DEDUP_BWAMETH) and bwa-mem (FASTQ_ALIGN_DEDUP_BWAMEM)
+# -----------------------------------------------------------------------------
+# BWAMETH_ALIGN. The module links the FASTA into the index directory; here a
+# local directory of links with the index's name stands in for it.
+rule bwameth_align:
+    input:
+        reads=lambda wc: trimmed_reads(wc.id),
+        fasta=FASTA,
+        index=INDEX,
+    output:
+        f"{RAW_DIR if ALIGNER == 'bwameth' else W + '/none'}/{{id}}.bam",
+    wildcard_constraints:
+        id=alternation(IDS) if ALIGNER == "bwameth" else "(?!x)x",
+    params:
+        args=args("bwameth_align"),
+        reads=lambda wc, input: " ".join(os.path.basename(r) for r in input.reads),
+    container:
+        container_path("bwameth")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input.reads} {input.fasta}
+        mkdir {INDEX_NAME}
+        for f in "$(realpath {input.index})"/*; do ln -s "$f" {INDEX_NAME}/; done
+        export BWA_METH_SKIP_TIME_CHECKS=1
+        ln -sf $(readlink {FASTA_NAME}) {INDEX_NAME}/{FASTA_NAME}
+        bwameth.py {params.args} -t {threads} --reference {INDEX_NAME}/{FASTA_NAME} {params.reads} \
+            | samtools view -@ {threads} -bhS -o {wildcards.id}.bam -
+        mv {wildcards.id}.bam {output}
+        """
+
+
+# BWA_MEM (sort_bam = true)
+rule bwa_mem:
+    input:
+        reads=lambda wc: trimmed_reads(wc.id),
+        index=INDEX,
+    output:
+        f"{RAW_DIR if ALIGNER == 'bwamem' else W + '/none'}/{{id}}.bam",
+    wildcard_constraints:
+        id=alternation(IDS) if ALIGNER == "bwamem" else "(?!x)x",
+    params:
+        args=args("bwa_mem"),
+        reads=lambda wc, input: " ".join(os.path.basename(r) for r in input.reads),
+    container:
+        container_path("bwa")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input.reads}
+        ln -sfn "$(realpath {input.index})" {INDEX_NAME}
+        # nf-core: find -L ./ (the work dir holds only the index); the shadow
+        # dir also links outdir, so search the staged index only -> ./<index>/<prefix>
+        INDEX=`find -L ./{INDEX_NAME} -name "*.amb" | sed 's/\\.amb$//'`
+        bwa mem {params.args} -t {threads} $INDEX {params.reads} \
+            | samtools sort --threads {threads} -o {wildcards.id}.bam -
+        mv {wildcards.id}.bam {output}
+        """
+
+
+def sort_input(wc):
+    sid = SORTED2ID[wc.path]
+    if BISMARK:
+        return mex_bam(sid)
+    return f"{RAW_DIR}/{sid}.bam"
+
+
+# SAMTOOLS_SORT (bismark: <id>.deduplicated.sorted / <id>.sorted; bwameth, bwamem: <id>.sorted)
+rule samtools_sort:
+    input:
+        bam=sort_input,
+        fasta=[FASTA] if ALIGNER == "bwamem" else [],
+    output:
+        "{path}",
+    wildcard_constraints:
+        path=alternation(SORTED.values()),
+    params:
+        prefix=lambda wc: basename_noext(wc.path),
+        # BAM_SORT_STATS_SAMTOOLS (bwamem) passes the FASTA; bismark / bwameth pass []
+        reference=f"--reference {FASTA_NAME}" if ALIGNER == "bwamem" else "",
+    container:
+        container_path("samtools")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        samtools cat $(basename {input.bam}) | samtools sort -T {params.prefix} --threads {threads} \
+            {params.reference} -o {params.prefix}.bam -
+        mv {params.prefix}.bam {output}
+        """
+
+
+# SAMTOOLS_INDEX (also SAMTOOLS_INDEX_ALIGNMENTS / _DEDUPLICATED)
+rule samtools_index:
+    input:
+        "{path}",
+    output:
+        "{path}.bai",
+    wildcard_constraints:
+        path=alternation(BAM_ID),
+    container:
+        container_path("samtools")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        samtools index -@ {threads} $(basename {input})
+        mv $(basename {input}).bai {output}
+        """
+
+
+# SAMTOOLS_FLAGSTAT (on the sorted alignment)
+rule samtools_flagstat:
+    input:
+        bam=lambda wc: SORTED[wc.id],
+        bai=lambda wc: SORTED[wc.id] + ".bai",
+    output:
+        f"{STATS_DIR}/{{id}}.flagstat",
+    wildcard_constraints:
+        id=alternation(IDS),
+    container:
+        container_path("samtools")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        samtools flagstat --threads {threads} $(basename {input.bam}) > {wildcards.id}.flagstat
+        mv {wildcards.id}.flagstat {output}
+        """
+
+
+# SAMTOOLS_STATS (bwamem passes the FASTA as --reference, bwameth does not)
+rule samtools_stats:
+    input:
+        bam=lambda wc: SORTED[wc.id],
+        bai=lambda wc: SORTED[wc.id] + ".bai",
+        fasta=[FASTA] if ALIGNER == "bwamem" else [],
+    output:
+        f"{STATS_DIR}/{{id}}.stats",
+    wildcard_constraints:
+        id=alternation(IDS),
+    params:
+        reference=f"--reference {FASTA_NAME}" if ALIGNER == "bwamem" else "",
+    container:
+        container_path("samtools")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        samtools stats --threads {threads} {params.reference} $(basename {input.bam}) > {wildcards.id}.stats
+        mv {wildcards.id}.stats {output}
+        """
+
+
+# SAMTOOLS_IDXSTATS (bwamem)
+rule samtools_idxstats:
+    input:
+        bam=lambda wc: SORTED[wc.id],
+        bai=lambda wc: SORTED[wc.id] + ".bai",
+    output:
+        f"{STATS_DIR}/{{id}}.idxstats",
+    wildcard_constraints:
+        id=alternation(IDS),
+    container:
+        container_path("samtools")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        samtools idxstats --threads $(({threads} - 1)) $(basename {input.bam}) > {wildcards.id}.idxstats
+        mv {wildcards.id}.idxstats {output}
+        """
+
+
+# PICARD_ADDORREPLACEREADGROUPS (bwamem; not published)
+rule picard_addorreplacereadgroups:
+    input:
+        bam=lambda wc: SORTED[wc.id],
+        fasta=FASTA,
+        fai=FAI or [],
+    output:
+        f"{W}/bwamem/readgroups/{{id}}.bam",
+    wildcard_constraints:
+        id=alternation(IDS),
+    params:
+        args=args("picard_addorreplacereadgroups"),
+        mem=lambda wc, resources: jvm_mem(resources),
+    container:
+        container_path("picard")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        picard -Xmx{params.mem}M AddOrReplaceReadGroups {params.args} --REFERENCE_SEQUENCE {FASTA_NAME} \
+            --INPUT $(basename {input.bam}) --OUTPUT {wildcards.id}.bam
+        mv {wildcards.id}.bam {output}
+        """
+
+
+# PICARD_MARKDUPLICATES (prefix <id>.markdup.sorted)
+rule picard_markduplicates:
+    input:
+        bam=lambda wc: f"{W}/bwamem/readgroups/{wc.id}.bam" if ALIGNER == "bwamem" else SORTED[wc.id],
+        fasta=FASTA,
+        fai=FAI or [],
+    output:
+        bam=f"{AL}/deduplicated/{{id}}.markdup.sorted.bam",
+        metrics=f"{AL}/deduplicated/picard_metrics/{{id}}.markdup.sorted.MarkDuplicates.metrics.txt",
+    wildcard_constraints:
+        id=alternation(IDS),
+    params:
+        args=args("picard_markduplicates"),
+        mem=lambda wc, resources: jvm_mem(resources),
+    container:
+        container_path("picard")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        picard -Xmx{params.mem}M MarkDuplicates {params.args} --INPUT $(basename {input.bam}) \
+            --OUTPUT {wildcards.id}.markdup.sorted.bam --REFERENCE_SEQUENCE {FASTA_NAME} \
+            --METRICS_FILE {wildcards.id}.markdup.sorted.MarkDuplicates.metrics.txt
+        mv {wildcards.id}.markdup.sorted.bam {output.bam}
+        mv {wildcards.id}.markdup.sorted.MarkDuplicates.metrics.txt {output.metrics}
+        """
+
+
+# -----------------------------------------------------------------------------
+# Methylation calling: MethylDackel (BAM_METHYLDACKEL), rastair (BAM_TAPS_CONVERSION)
+# -----------------------------------------------------------------------------
+METHYLDACKEL_EXTRACT_ARGS = gjoin([
+    " --CHG --CHH" if flag("all_contexts") else "",
+    " --mergeContext" if flag("merge_context") else "",
+    " --ignoreFlags" if flag("ignore_flags") else "",
+    " --methylKit" if flag("methyl_kit") else "",
+    f" --minDepth {config['min_depth']}" if num("min_depth") > 0 else "",
+])
+METHYLDACKEL_MBIAS_ARGS = gjoin([
+    " --CHG --CHH" if flag("all_contexts") else "",
+    " --ignoreFlags" if flag("ignore_flags") else "",
+])
+
+
+def final_bam_inputs(wc):
+    return dict(bam=FINAL[wc.id], bai=FINAL[wc.id] + ".bai", fasta=FASTA, fai=FAI)
+
+
+# METHYLDACKEL_EXTRACT
+rule methyldackel_extract:
+    input:
+        unpack(final_bam_inputs),
+    output:
+        [f"{O}/methyldackel/{{id}}.{'sorted' if SKIP_DEDUP else 'markdup.sorted'}_{c}.{MD_EXT}" for c in MD_CONTEXTS],
+    wildcard_constraints:
+        id=alternation(IDS),
+    params:
+        args=METHYLDACKEL_EXTRACT_ARGS,
+    container:
+        container_path("methyldackel")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        MethylDackel extract {params.args} {FASTA_NAME} $(basename {input.bam})
+        for f in {output}; do mv $(basename $f) $f; done
+        """
+
+
+# METHYLDACKEL_MBIAS
+rule methyldackel_mbias:
+    input:
+        unpack(final_bam_inputs),
+    output:
+        f"{O}/methyldackel/mbias/{{id}}.mbias.txt",
+    wildcard_constraints:
+        id=alternation(IDS),
+    params:
+        args=METHYLDACKEL_MBIAS_ARGS,
+    container:
+        container_path("methyldackel")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        MethylDackel mbias {params.args} {FASTA_NAME} $(basename {input.bam}) {wildcards.id} --txt \
+            > {wildcards.id}.mbias.txt
+        mv {wildcards.id}.mbias.txt {output}
+        """
+
+
+# RASTAIR_MBIAS
+rule rastair_mbias:
+    input:
+        unpack(final_bam_inputs),
+    output:
+        f"{O}/rastair/mbias/{{id}}.rastair_mbias.txt",
+    wildcard_constraints:
+        id=alternation(IDS),
+    container:
+        container_path("rastair")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        rastair mbias --threads {threads} --fasta-file {FASTA_NAME} $(basename {input.bam}) \
+            > {wildcards.id}.rastair_mbias.txt
+        mv {wildcards.id}.rastair_mbias.txt {output}
+        """
+
+
+# RASTAIR_MBIASPARSER (the optional PDF is published if plot_mbias.R writes one)
+rule rastair_mbiasparser:
+    input:
+        f"{O}/rastair/mbias/{{id}}.rastair_mbias.txt",
+    output:
+        f"{O}/rastair/mbiasparser/{{id}}.rastair_mbias_processed.csv",
+    wildcard_constraints:
+        id=alternation(IDS),
+    params:
+        dir=f"{O_ABS}/rastair/mbiasparser",
+    container:
+        container_path("rastair")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        p={wildcards.id}.rastair_mbias_processed
+        plot_mbias.R --pdf -o $p.pdf $(basename {input}) > $p.txt
+        parse_mbias.R $p.txt $p.csv
+        mv $p.csv {output}
+        if [ -f $p.pdf ]; then mv $p.pdf {params.dir}/; fi
+        """
+
+
+# RASTAIR_CALL (--nOT / --nOB: first / second line of the mbiasparser CSV)
+rule rastair_call:
+    input:
+        unpack(final_bam_inputs),
+        csv=f"{O}/rastair/mbiasparser/{{id}}.rastair_mbias_processed.csv",
+    output:
+        f"{O}/rastair/call/{{id}}.rastair_call.txt",
+    wildcard_constraints:
+        id=alternation(IDS),
+    container:
+        container_path("rastair")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input.bam} {input.bai} {input.fasta} {input.fai}
+        trim_OT=$(head -n 1 {input.csv})
+        trim_OB=$(head -n 2 {input.csv} | tail -n 1)
+        rastair call --threads {threads} --nOT $trim_OT --nOB $trim_OB --fasta-file {FASTA_NAME} \
+            $(basename {input.bam}) > {wildcards.id}.rastair_call.txt
+        mv {wildcards.id}.rastair_call.txt {output}
+        """
+
+
+# RASTAIR_METHYLKIT
+rule rastair_methylkit:
+    input:
+        f"{O}/rastair/call/{{id}}.rastair_call.txt",
+    output:
+        f"{O}/rastair/methylkit/{{id}}.rastair_methylkit.txt.gz",
+    wildcard_constraints:
+        id=alternation(IDS),
+    container:
+        container_path("rastair")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shell:
+        "cat {input} | rastair_call_to_methylkit.sh | gzip -c > {output}"
+
+
+# -----------------------------------------------------------------------------
+# QC: Qualimap, Preseq
+# -----------------------------------------------------------------------------
+# QUALIMAP_BAMQC
+rule qualimap_bamqc:
+    input:
+        bam=lambda wc: FINAL[wc.id],
+        regions=asset_path(stage(param("bamqc_regions_file"))) if param("bamqc_regions_file") else [],
+    output:
+        directory(f"{AL}/qualimap/bamqc/{{id}}"),
+    wildcard_constraints:
+        id=alternation(IDS),
+    params:
+        args="",  # -gd HUMAN / MOUSE come from iGenomes `genome`, not ported
+        regions=lambda wc, input: f"--gff {input.regions}" if input.regions else "",
+        pairs=lambda wc: "" if is_se(wc.id) else "--collect-overlap-pairs",
+        mem=lambda wc, resources: f"{jvm_mem(resources)}M",
+    container:
+        container_path("qualimap")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input.bam}
+        unset DISPLAY
+        mkdir -p tmp
+        export _JAVA_OPTIONS=-Djava.io.tmpdir=./tmp
+        qualimap --java-mem-size={params.mem} bamqc {params.args} -bam $(basename {input.bam}) \
+            {params.regions} -p non-strand-specific {params.pairs} -outdir {wildcards.id} -nt {threads}
+        mv {wildcards.id} {output}
+        """
+
+
+# QUALIMAP_BAMQC versions.yml (published by the pattern "*" publishDir)
+rule qualimap_versions:
+    output:
+        f"{AL}/qualimap/bamqc/versions.yml",
+    container:
+        container_path("qualimap")
+    shell:
+        """
+        cat <<-END_VERSIONS > {output}
+"NFCORE_METHYLSEQ:METHYLSEQ:QUALIMAP_BAMQC":
+    qualimap: $(echo $(qualimap 2>&1) | sed 's/^.*QualiMap v.//; s/Built.*$//')
+END_VERSIONS
+        """
+
+
+# PRESEQ_LCEXTRAP (errorStrategy 'ignore': on failure nothing is published)
+rule preseq_lcextrap:
+    input:
+        lambda wc: FINAL[wc.id],
+    output:
+        touch(f"{W}/preseq/{{id}}.done"),
+    wildcard_constraints:
+        id=alternation(IDS),
+    params:
+        args=args("preseq_lcextrap"),
+        pe=lambda wc: "" if is_se(wc.id) else "-pe",
+        dir=f"{O_ABS}/{ALIGNER}/preseq",
+    container:
+        container_path("preseq")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        if preseq lc_extrap {params.args} {params.pe} -output {wildcards.id}.lc_extrap.txt \
+            $(basename {input}) 2> {wildcards.id}.command.log; then
+            mkdir -p {params.dir}/log
+            mv {wildcards.id}.lc_extrap.txt {params.dir}/
+            mv {wildcards.id}.command.log {params.dir}/log/
+        else
+            cat {wildcards.id}.command.log >&2
+            echo "PRESEQ_LCEXTRAP failed for {wildcards.id}; ignored as in nf-core." >&2
+        fi
+        """
+
+
+# -----------------------------------------------------------------------------
+# Targeted sequencing (TARGETED_SEQUENCING)
+# -----------------------------------------------------------------------------
+# BEDTOOLS_INTERSECT (prefix = bedGraph baseName, suffix targeted.bedGraph)
+rule bedtools_intersect:
+    input:
+        bedgraph=lambda wc: TARGET_SRC[wc.path],
+        targets=TARGET_BED or [],
+    output:
+        "{path}",
+    wildcard_constraints:
+        path=alternation(TARGET_SRC),
+    params:
+        args=args("bedtools_intersect"),
+    container:
+        container_path("bedtools")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        bedtools intersect -a $(basename {input.bedgraph}) -b $(basename {input.targets}) {params.args} \
+            > $(basename {output})
+        mv $(basename {output}) {output}
+        """
+
+
+# PICARD_CREATESEQUENCEDICTIONARY (prefix = fasta meta.id)
+rule picard_createsequencedictionary:
+    input:
+        FASTA,
+    output:
+        DICT,
+    params:
+        args=args("picard_createsequencedictionary"),
+        mem=lambda wc, resources: jvm_mem(resources),
+    container:
+        container_path("picard")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        picard -Xmx{params.mem}M CreateSequenceDictionary {params.args} --REFERENCE {FASTA_NAME} \
+            --OUTPUT $(basename {output})
+        mv $(basename {output}) {output}
+        """
+
+
+# PICARD_BEDTOINTERVALLIST (prefix = target BED baseName)
+# PICARD_COLLECTHSMETRICS is not run: in nf-core 4.2.0 its inputs are combined
+# with the empty ch_gzi channel, so it never gets a task.
+rule picard_bedtointervallist:
+    input:
+        bed=TARGET_BED or [],
+        dict=DICT,
+    output:
+        INTERVALLIST or f"{W}/none.intervallist",
+    params:
+        args=args("picard_bedtointervallist"),
+        mem=lambda wc, resources: jvm_mem(resources),
+    container:
+        container_path("picard")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        stage {input}
+        picard -Xmx{params.mem}M BedToIntervalList --INPUT $(basename {input.bed}) \
+            --OUTPUT $(basename {output}) --SEQUENCE_DICTIONARY $(basename {input.dict}) --TMP_DIR . {params.args}
+        mv $(basename {output}) {output}
+        """
+
+
+# -----------------------------------------------------------------------------
+# MultiQC
+# -----------------------------------------------------------------------------
+def multiqc_files(wc):
+    files = []
+    if flag("run_qualimap"):
+        files += [f"{AL}/qualimap/bamqc/{s}" for s in IDS]
+    if BISMARK:
+        files += [f"{AL}/summary/bismark_summary_report.txt", f"{AL}/summary/bismark_summary_report.html"]
+        for s in IDS:
+            n = mex_name(s)
+            files += [ALIGN_REPORT[s], f"{MC}/splitting_report/{n}_splitting_report.txt",
+                      f"{MC}/mbias/{n}.M-bias.txt", bismark_report_html(s)]
+            if not SKIP_DEDUP:
+                files.append(DEDUP_REPORT[s])
+    else:
+        for s in IDS:
+            if not SKIP_DEDUP:
+                files.append(picard_metrics(s))
+            files += align_stats(s)
+    for s in IDS:
+        if not SKIP_TRIM:
+            files += trim_reports(s)
+        if not SKIP_FASTQC:
+            files += [f for f in fastqc_outputs(s) if f.endswith(".zip")]
+    return files
+
+
+rule multiqc:
+    input:
+        files=multiqc_files,
+        preseq=[f"{W}/preseq/{s}.done" for s in IDS] if flag("run_preseq") else [],
+        config=f"{ASSETS}/multiqc_config.yml",
+        extra_config=asset_path(param("multiqc_config")) if param("multiqc_config") else [],
+        logo=asset_path(param("multiqc_logo")) if param("multiqc_logo") else [],
+    output:
+        rep=f"{MULTIQC_DIR}/multiqc_report.html",
+        data=directory(f"{MULTIQC_DIR}/multiqc_data"),
+        plots=directory(f"{MULTIQC_DIR}/multiqc_plots"),
+    params:
+        title=f"--title \"{config['multiqc_title']}\"" if param("multiqc_title") else "",
+        extra_config=lambda wc, input: f"--config {os.path.basename(input.extra_config)}" if input.extra_config else "",
+        logo=lambda wc, input: (
+            f"--cl-config 'custom_logo: \"{os.path.basename(input.logo)}\"'" if input.logo else ""
+        ),
+        preseq_logs=f"{O_ABS}/{ALIGNER}/preseq/log" if flag("run_preseq") else "",
+    container:
+        container_path("multiqc")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        mkdir work_mqc && cd work_mqc
+        i=0
+        for f in {input.files}; do
+            i=$((i+1)); mkdir -p $i; ln -s "$(realpath "../$f" 2>/dev/null || realpath "$f")" $i/
+        done
+        if [ -n "{params.preseq_logs}" ] && ls {params.preseq_logs}/*.command.log >/dev/null 2>&1; then
+            for f in {params.preseq_logs}/*.command.log; do i=$((i+1)); mkdir -p $i; ln -s "$f" $i/; done
+        fi
+        cd ..
+        ln -s "$(realpath {input.config})" work_mqc/multiqc_config.yml
+        for f in {input.extra_config} {input.logo}; do ln -s "$(realpath $f)" work_mqc/; done
+        cd work_mqc
+        multiqc --force {params.title} --config multiqc_config.yml {params.extra_config} {params.logo} .
+        cd ..
+        mv work_mqc/multiqc_report.html {output.rep}
+        mv work_mqc/multiqc_data {output.data}
+        mv work_mqc/multiqc_plots {output.plots}
+        """

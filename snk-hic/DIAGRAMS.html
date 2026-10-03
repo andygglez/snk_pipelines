@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>snk-hic diagrams</title>
+<style>
+:root { --bg:#ffffff; --fg:#1f2328; --muted:#59636e; --border:#d1d9e0; --code:#f6f8fa; --link:#0969da; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --border:#3d444d; --code:#151b23; --link:#4493f8; }
+}
+body { background:var(--bg); color:var(--fg); margin:0; font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+main { max-width:1200px; margin:0 auto; padding:24px 16px 64px; }
+h1,h2 { border-bottom:1px solid var(--border); padding-bottom:.3em; }
+a { color:var(--link); }
+code { background:var(--code); padding:.1em .35em; border-radius:4px; font-size:90%; }
+pre { background:var(--code); padding:12px; border-radius:6px; overflow:auto; }
+pre code { background:none; padding:0; }
+table { border-collapse:collapse; display:block; overflow-x:auto; margin:1em 0; }
+th,td { border:1px solid var(--border); padding:6px 10px; vertical-align:top; }
+th { background:var(--code); text-align:left; }
+.mermaid { font-family:Arial,Helvetica,sans-serif; background:#ffffff; border:1px solid var(--border); border-radius:8px; padding:12px; overflow-x:auto; margin:1em 0; cursor:zoom-in; }
+.mermaid svg { max-width:100% !important; height:auto; }
+.mermaid.full { cursor:zoom-out; }
+.mermaid.full svg { max-width:none !important; }
+.mermaid foreignObject { overflow:visible; }
+.hint { color:var(--muted); font-size:13px; }
+.mermaid-error { color:#cf222e; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<main><p class="hint">Diagrams are scaled to fit the page; click one to see it full size (scroll sideways), click again to fit.</p><div id="content"></div></main>
+<script type="text/plain" id="src"># snk-hic — pipeline diagrams
+
+Snakemake port of **nf-core/hic 2.1.0**. These diagrams show the flow of commands and data
+through `Snakefile`, and how each key in `config/config.yaml` changes those commands.
+They are written in Mermaid. You can view them on GitHub, in VS Code (with a Mermaid preview
+extension), or by opening `DIAGRAMS.html` in a browser.
+
+**How to read them**
+
+- `«key»` inside a command is a value that comes straight from `config/config.yaml`.
+- Dashed boxes are rules that only run under some settings (the condition is on the box).
+- Each rule runs in the image given by `config/containers.yaml` (`containers:` → key named in the rule).
+- `{res}` is one contact-map resolution. `{chunk}` is one FASTQ pair (one samplesheet row, or one piece when `split_fastq` is on). `{mate}` is R1 or R2.
+
+---
+
+## 1. Analysis overview
+
+```mermaid
+flowchart TD
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    SS[/"samplesheet<br/>sample, fastq_1, fastq_2"/]:::input
+    FA[/"genome FASTA"/]:::input
+
+    subgraph REF["1 · Reference preparation"]
+        IDX["bowtie2 index"]:::step
+        SIZES["chromosome sizes"]:::step
+        FRAG["restriction fragments BED"]:::step
+    end
+
+    subgraph MAP["2 · Two-step mate mapping (HiC-Pro)"]
+        E2E["end-to-end bowtie2<br/>each mate separately"]:::step
+        TRIM["trim unmapped reads<br/>at ligation junction"]:::step
+        RE["re-align trimmed reads"]:::step
+        MERGE["merge + name-sort"]:::step
+        PAIR["pair R1/R2, MAPQ filter"]:::step
+    end
+
+    subgraph VP["3 · Valid interactions"]
+        VALID["assign to restriction fragments<br/>classify pairs"]:::step
+        ALLVP["merge chunks, remove duplicates<br/>allValidPairs"]:::out
+        STATS["merged mapping / pairing / RS stats"]:::out
+        PAIRS["4DN .pairs.gz + pairix index"]:::out
+    end
+
+    subgraph MAPS["4 · Contact maps (cooler)"]
+        COOL["cool per resolution"]:::step
+        BAL["balanced cool (ICE)"]:::out
+        MCOOL["multi-resolution .mcool"]:::out
+        TXT["text matrices"]:::out
+        HPM["HiC-Pro matrices + iced"]:::opt
+    end
+
+    subgraph DOWN["5 · Downstream analysis"]
+        DD["distance decay"]:::out
+        COMP["A/B compartments"]:::out
+        TADS["TADs: insulation / hicFindTADs"]:::out
+    end
+
+    QC["FastQC → MultiQC report"]:::out
+
+    FA --> IDX & SIZES & FRAG
+    SS --> E2E
+    IDX --> E2E --> TRIM --> RE --> MERGE --> PAIR
+    E2E --> MERGE
+    PAIR --> VALID
+    FRAG --> VALID
+    VALID --> ALLVP --> PAIRS --> COOL
+    VALID --> STATS
+    SIZES --> COOL
+    COOL --> BAL --> TXT
+    COOL --> MCOOL
+    ALLVP --> HPM
+    BAL --> DD & COMP & TADS
+    SS --> QC
+    STATS --> QC
+```
+
+---
+
+## 2. Command flow (what each rule runs)
+
+Every box is a Snakemake rule, with the nf-core process it mirrors and its command.
+
+```mermaid
+flowchart TD
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef dnase fill:#fae8ff,stroke:#a21caf,color:#111,stroke-dasharray:5 4
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    SS[/"«input» samplesheet"/]:::input
+    FA[/"«fasta»"/]:::input
+
+    FETCH["fetch_remote<br/>download http/ftp inputs to outdir/inputs/"]:::opt
+    CHK["samplesheet_check<br/>check_samplesheet.py"]:::step
+    SPLIT["split_fastq — checkpoint<br/>zcat | split -l 4×«fastq_chunks_size»<br/>if «split_fastq»"]:::opt
+
+    subgraph PREP["PREPARE_GENOME — each rule skipped when the file is given"]
+        BT2B["bowtie2_build<br/>bowtie2-build FASTA prefix<br/>skipped if «bwt2_index»"]:::step
+        GCS["getchromsizes<br/>samtools faidx · cut -f1,2<br/>skipped if «chromosome_size»"]:::step
+        GRF["get_restriction_fragments<br/>digest_genome.py -r RESTRICTION_SITE<br/>skipped if «restriction_fragments»"]:::step
+    end
+
+    FQC["fastqc — per chunk<br/>fastqc R1 R2"]:::step
+
+    subgraph HMAP["HICPRO_MAPPING — per sample × chunk × mate"]
+        BA["bowtie2_align<br/>bowtie2 -U mate --un-gz unmapped «bwt2_opts_end2end»<br/>| samtools view -F 4"]:::step
+        TR["trim_reads<br/>cutsite_trimming --cutsite LIGATION_SITE"]:::step
+        BAT["bowtie2_align_trimmed<br/>bowtie2 -U trimmed «bwt2_opts_trimmed»"]:::step
+        MB["merge_bowtie2<br/>samtools merge · samtools sort -n -m «samtools_sort_mem»<br/>→ .mapstat"]:::step
+        MSD["mapping_stats_dnase<br/>samtools view -c → .mapstat<br/>only if «dnase»"]:::dnase
+        CM["combine_mates<br/>mergeSAM.py -f R1 -r R2 -t -q «min_mapq» [--multi if «keep_multi»]<br/>→ bwt2pairs.bam + .pairstat"]:::step
+    end
+
+    subgraph HPRO["HICPRO — valid pairs"]
+        GVI["get_valid_interaction<br/>mapped_2hic_fragments.py -f fragments --all<br/>-d «min_cis_dist» -s «min_insert_size» -l «max_insert_size»<br/>-t «min_restriction_fragment_size» -m «max_restriction_fragment_size»<br/>[--sam if «save_interaction_bam»]"]:::step
+        GVID["get_valid_interaction_dnase<br/>mapped_2hic_dnase.py -d «min_cis_dist»<br/>only if «dnase»"]:::dnase
+        MVI["merge_valid_interaction — per sample<br/>hicpro_merge_validpairs.sh [-d unless «keep_dups»]<br/>→ allValidPairs + mergestat"]:::out
+        MS["merge_mapstats / merge_pairstats / merge_rsstats<br/>merge_statfiles.py"]:::out
+        H2P["hicpro2pairs<br/>awk reorder | bgzip · pairix"]:::out
+        BCM["build_contact_maps<br/>build_matrix --binsize res<br/>if «hicpro_maps»"]:::opt
+        ICE["ice_normalization<br/>ice --filter_low_counts_perc «ice_filter_low_count_perc»<br/>--filter_high_counts_perc «ice_filter_high_count_perc»<br/>--max_iter «ice_max_iter» --eps «ice_eps»"]:::opt
+    end
+
+    subgraph COOLER["COOLER — per sample × res"]
+        MKB["cooler_makebins<br/>cooler makebins sizes res"]:::out
+        CL["cooler_cload<br/>cooler cload «cooler_cload_args» sizes:res pairs"]:::step
+        CB["cooler_balance<br/>cp · cooler balance «cooler_balance_args»"]:::out
+        CZ["cooler_zoomify<br/>cooler zoomify «cooler_zoomify_args»<br/>base res = min(«res_zoomify») or min(all res)"]:::out
+        CD["cooler_dump<br/>cooler dump «cooler_dump_args»"]:::step
+        SCD["split_cooler_dump<br/>awk → _raw.txt / _balanced.txt"]:::out
+    end
+
+    subgraph DS["Downstream — per sample × res"]
+        DVC["hic_plot_dist_vs_counts<br/>hicPlotDistVsCounts<br/>res in «res_dist_decay» unless «skip_dist_decay»"]:::opt
+        EIG["cooltools_eigscis<br/>cooltools genome binnify / gc<br/>cooltools eigs-cis «cooltools_eigscis_args»<br/>res in «res_compartments» unless «skip_compartments»"]:::opt
+        INS["cooltools_insulation<br/>cooltools insulation «cooltools_insulation_args»<br/>insulation in «tads_caller», res in «res_tads»"]:::opt
+        HFT["hic_find_tads<br/>hicFindTADs «hicfindtads_args»<br/>hicexplorer in «tads_caller», res in «res_tads»"]:::opt
+    end
+
+    MQC["multiqc<br/>multiqc -c «multiqc_config» fastqc/ stats/<br/>unless «skip_multiqc»"]:::opt
+
+    SS -.-> FETCH
+    FA -.-> FETCH
+    SS --> CHK
+    SS --> SPLIT
+    FA --> BT2B & GCS & GRF
+    SPLIT --> FQC & BA
+    SS --> FQC & BA
+    BT2B --> BA & BAT
+    CHK --> BA
+    BA -->|"unmapped.fastq.gz"| TR --> BAT
+    BA -->|"mate.bam"| MB
+    BAT --> MB
+    BA -.->|"dnase"| MSD
+    MB --> CM
+    MSD -.-> CM
+    BA -.->|"dnase: mate.bam"| CM
+    CM --> GVI
+    CM -.-> GVID
+    GRF --> GVI
+    GVI --> MVI
+    GVID -.-> MVI
+    GVI & CM & MB --> MS
+    MVI --> H2P --> CL
+    MVI --> BCM --> ICE
+    GCS --> BCM & CL & MKB & EIG
+    CL --> CB --> CD --> SCD
+    CL --> CZ
+    CB --> DVC & EIG & INS & HFT
+    FQC & MS --> MQC
+```
+
+The `bowtie2_align` filter `-F 4` (keep mapped reads only) is dropped when `«dnase»` is true.
+`RESTRICTION_SITE` and `LIGATION_SITE` are resolved from the digestion keys (see figure 3).
+
+---
+
+## 3. How config switches shape the run
+
+Colours: yellow = config key, blue = value derived in the Snakefile, grey = rules affected.
+
+### 3a · Digestion protocol (decided at start-up)
+
+```mermaid
+flowchart TD
+    classDef key fill:#fef9c3,stroke:#ca8a04,color:#111
+    classDef rule fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef derived fill:#e0e7ff,stroke:#4f46e5,color:#111
+    classDef err fill:#fee2e2,stroke:#dc2626,color:#111
+
+    D1{"«digestion» set?"}:::key
+    D2{"«restriction_site» and<br/>«ligation_site» set?"}:::key
+    D3{"«dnase»?"}:::key
+    SITES["sites from preset «digest».«digestion»<br/>hindiii · mboi · dpnii · arima"]:::derived
+    SITES2["sites = the two keys as given"]:::derived
+    ERR["start-up error:<br/>ligation motif not found"]:::err
+    D1 -->|yes| SITES
+    D1 -->|no| D2
+    D2 -->|yes| SITES2
+    D2 -->|no| D3
+    D3 -->|no| ERR
+
+    RS["RESTRICTION_SITE → get_restriction_fragments<br/>digest_genome.py -r"]:::rule
+    LS["LIGATION_SITE → trim_reads<br/>cutsite_trimming --cutsite"]:::rule
+    RB["restriction-enzyme branch:<br/>trim_reads → bowtie2_align_trimmed → merge_bowtie2<br/>get_valid_interaction (needs fragments BED)"]:::rule
+    DB["DNase branch:<br/>bowtie2_align without -F 4<br/>mapping_stats_dnase · get_valid_interaction_dnase<br/>no fragments, no trimming"]:::rule
+    SITES & SITES2 --> RS & LS --> RB
+    D3 -->|yes| DB
+```
+
+### 3b · Resolutions (which contact maps and analyses are built)
+
+```mermaid
+flowchart LR
+    classDef key fill:#fef9c3,stroke:#ca8a04,color:#111
+    classDef rule fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef derived fill:#e0e7ff,stroke:#4f46e5,color:#111
+
+    BS["«bin_size»"]:::key
+    RZ["«res_zoomify»"]:::key
+    RT["«res_tads»<br/>empty if «skip_tads»"]:::key
+    RD["«res_dist_decay»<br/>empty if «skip_dist_decay»"]:::key
+    RC["«res_compartments»<br/>empty if «skip_compartments»"]:::key
+    MAPRES["MAP_RES<br/>sorted union of all lists"]:::derived
+    ZR["ZOOMIFY_RES<br/>min «res_zoomify», else min MAP_RES"]:::derived
+
+    BS & RZ & RT & RD & RC --> MAPRES
+    RZ --> ZR
+    MAPRES --> CR["per res: cooler_cload · cooler_balance<br/>cooler_dump · split_cooler_dump · cooler_makebins<br/>+ build_contact_maps · ice_normalization if «hicpro_maps»"]:::rule
+    ZR --> CZ["cooler_zoomify → sample.mcool"]:::rule
+    RD --> DVC["hic_plot_dist_vs_counts"]:::rule
+    RC --> EIG["cooltools_eigscis"]:::rule
+    RT --> TC{"«tads_caller»"}:::key
+    TC -->|insulation| INS["cooltools_insulation"]:::rule
+    TC -->|hicexplorer| HFT["hic_find_tads"]:::rule
+```
+
+### 3c · Inputs you can supply, splitting, and what is kept
+
+```mermaid
+flowchart LR
+    classDef key fill:#fef9c3,stroke:#ca8a04,color:#111
+    classDef rule fill:#f3f4f6,stroke:#6b7280,color:#111
+
+    K1["«bwt2_index»"]:::key --> S1["bowtie2_build not run"]:::rule
+    K2["«chromosome_size»"]:::key --> S2["getchromsizes not run"]:::rule
+    K3["«restriction_fragments»"]:::key --> S3["get_restriction_fragments not run"]:::rule
+    SPL["«split_fastq»"]:::key --> SP["split_fastq checkpoint<br/>chunks of «fastq_chunks_size» reads,<br/>each mapped and filtered on its own"]:::rule
+    MQ["«skip_multiqc»"]:::key --> MQr["multiqc not run"]:::rule
+    T1["«save_reference»"]:::key --> U1["keep genome/ index, sizes, fragments"]:::rule
+    T2["«save_aligned_intermediates»"]:::key --> U2["keep per-mate BAMs,<br/>unmapped and trimmed FASTQ"]:::rule
+    T3["«save_pairs_intermediates»"]:::key --> U3["keep per-chunk validPairs and<br/>DE/SC/RE/Filt/Dump/Single pairs"]:::rule
+    T4["«save_raw_maps»"]:::key --> U4["keep raw .cool and _raw.txt"]:::rule
+```
+
+When a `save_*` key is `false`, those files are marked `temp()` and removed once nothing needs them.
+
+---
+
+## 4. Config key reference
+
+| Key | Rule(s) | Effect on the command |
+|---|---|---|
+| `input` | all per-sample rules | Samplesheet. Each row is one chunk; rows that share a `sample` are merged at `merge_valid_interaction`. |
+| `outdir` | all | Root of every output path. |
+| `fasta` | bowtie2_build, getchromsizes, get_restriction_fragments, cooltools_eigscis | Genome FASTA (required; may be a URL → `fetch_remote`). |
+| `bwt2_index` | bowtie2_align, bowtie2_align_trimmed | Pre-built index dir; when set, `bowtie2_build` doesn't run. |
+| `chromosome_size` | cooler_*, build_contact_maps, cooltools_eigscis | Sizes file; when set, `getchromsizes` doesn't run. |
+| `restriction_fragments` | get_valid_interaction | Fragments BED; when set, `get_restriction_fragments` doesn't run. |
+| `save_reference` | bowtie2_build, getchromsizes, get_restriction_fragments | `false` → `genome/` outputs are `temp()` and deleted after use. |
+| `split_fastq`, `fastq_chunks_size` | split_fastq (checkpoint) | Split each FASTQ pair into chunks of N reads (`split -l 4N`). Each chunk is mapped on its own. |
+| `bwt2_opts_end2end` | bowtie2_align | Appended to `bowtie2 -U` (first, end-to-end pass). |
+| `bwt2_opts_trimmed` | bowtie2_align_trimmed | Appended to `bowtie2 -U` (second pass, on reads trimmed at the ligation site). |
+| `samtools_sort_mem` | merge_bowtie2 | `samtools sort -m`. |
+| `save_aligned_intermediates` | bowtie2_align, trim_reads, bowtie2_align_trimmed, merge_bowtie2 | Keep or delete per-mate BAMs and FASTQs. |
+| `min_mapq` | combine_mates | `mergeSAM.py -q`; 0 leaves the flag out. |
+| `keep_multi` | combine_mates | Adds `--multi`. |
+| `digestion` + `digest` | get_restriction_fragments, trim_reads | Picks a preset from `digest:` for `RESTRICTION_SITE` (`digest_genome.py -r`) and `LIGATION_SITE` (`cutsite_trimming --cutsite`). |
+| `restriction_site`, `ligation_site` | same | Custom sites, used when `digestion` is empty. |
+| `dnase` | bowtie2_align, mapping/valid-pair rules | Swaps in `mapping_stats_dnase` and `get_valid_interaction_dnase`; drops trimming/re-alignment and `samtools view -F 4`. |
+| `min_cis_dist` | get_valid_interaction(_dnase) | `-d` when > 0. |
+| `min_insert_size` / `max_insert_size` | get_valid_interaction | `-s` / `-l` when > 0. |
+| `min_restriction_fragment_size` / `max_restriction_fragment_size` | get_valid_interaction | `-t` / `-m` when > 0. |
+| `save_interaction_bam` | get_valid_interaction | Adds `--sam`. |
+| `save_pairs_intermediates` | get_valid_interaction(_dnase) | Keep or delete chunk validPairs and the other pair-class files. |
+| `keep_dups` | merge_valid_interaction | `false` → `hicpro_merge_validpairs.sh -d` (remove duplicates). |
+| `bin_size` | cooler_* | Contact-map resolutions; merged with every downstream resolution into `MAP_RES`. |
+| `res_zoomify` | cooler_zoomify | The finest value is the base resolution of `<sample>.mcool`. |
+| `save_raw_maps` | cooler_cload, split_cooler_dump | Keep the raw `.cool` and `_raw.txt` (otherwise `temp()`). |
+| `hicpro_maps` | build_contact_maps, ice_normalization | Also build HiC-Pro text matrices and ICE-normalise them. |
+| `ice_max_iter`, `ice_filter_low_count_perc`, `ice_filter_high_count_perc`, `ice_eps` | ice_normalization | `ice --max_iter / --filter_low_counts_perc / --filter_high_counts_perc / --eps`. |
+| `cooler_cload_args` | cooler_cload | Inserted after `cooler cload`. Contains `pairix` or `tabix` → `--nproc threads` is also added. |
+| `cooler_balance_args` | cooler_balance | Inserted after `cooler balance`. |
+| `cooler_zoomify_args` | cooler_zoomify | Inserted after `cooler zoomify`. |
+| `cooler_dump_args` | cooler_dump | Inserted after `cooler dump`. |
+| `res_dist_decay`, `skip_dist_decay` | hic_plot_dist_vs_counts | Resolutions for distance-decay plots; skip → none. |
+| `res_compartments`, `skip_compartments`, `cooltools_eigscis_args` | cooltools_eigscis | Resolutions and `eigs-cis` arguments; skip → none. |
+| `res_tads`, `skip_tads`, `tads_caller` | cooltools_insulation, hic_find_tads | Resolutions; the caller list picks insulation and/or hicexplorer. |
+| `cooltools_insulation_args` | cooltools_insulation | Window sizes and flags for `cooltools insulation`. |
+| `hicfindtads_args` | hic_find_tads | Appended to `hicFindTADs`. |
+| `multiqc_config`, `skip_multiqc` | multiqc | `multiqc -c`; skip → no report. |
+| `resources.<label>` | every rule | `threads` and `mem_mb` per nf-core label (single/low/medium/high/high_memory). |
+
+---
+
+## 5. Exact rule graph
+
+To regenerate the real rule DAG for a config (with no runs), from inside `snk-hic/`:
+
+```bash
+snakemake --configfile config/test.yaml --rulegraph mermaid-js > rulegraph.mmd
+```
+</script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+const md = document.getElementById('src').textContent;
+const renderer = new marked.Renderer();
+const baseCode = renderer.code.bind(renderer);
+renderer.code = function (code, lang) {
+  if (typeof code === 'object') { lang = code.lang; code = code.text; }
+  if (lang === 'mermaid') {
+    const div = document.createElement('div');
+    div.className = 'mermaid';
+    div.textContent = code;
+    return div.outerHTML;
+  }
+  return baseCode.apply(null, arguments);
+};
+document.getElementById('content').innerHTML = marked.parse(md, { renderer });
+mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose',
+                      fontFamily: 'Arial, Helvetica, sans-serif',
+                      flowchart: { htmlLabels: true, useMaxWidth: false, wrappingWidth: 400, padding: 24 } });
+document.addEventListener('click', e => {
+  const d = e.target.closest('.mermaid'); if (d) d.classList.toggle('full');
+});
+mermaid.run({ querySelector: '.mermaid' }).then(() => {
+  console.log('[diagrams] rendered', document.querySelectorAll('.mermaid svg').length, 'of',
+              document.querySelectorAll('.mermaid').length);
+}).catch(e => { console.error('[diagrams] mermaid error', e); });
+</script>
+</body>
+</html>

@@ -1,0 +1,122 @@
+# =============================================================================
+# snk-chipseq — Snakemake port of nf-core/chipseq
+# Reference implementation: nf-core/chipseq 2.1.0 (../nfcore-chipseq/2_1_0)
+# Defaults below mirror nextflow.config / conf/modules.config of that release.
+# Container paths live in config/containers.yaml.
+# =============================================================================
+
+# ---- Input / output ---------------------------------------------------------
+# CSV with header: sample,fastq_1,fastq_2,replicate,antibody,control,control_replicate
+# (validated by scripts/check_samplesheet.py, as SAMPLESHEET_CHECK does).
+# Paths may be local or http(s)/ftp URLs.
+input: "config/samplesheet.csv"  ### <path to samplesheet CSV>
+outdir: "results"            ### <directory>
+# Intermediate files that nf-core keeps in its work/ directory. Kept outside
+# outdir so outdir mirrors the nf-core publishDir layout file for file.
+workdir: "work"              ### <directory>
+
+# ---- References -------------------------------------------------------------
+# iGenomes (`genome`) is not ported: give the files explicitly.
+fasta: ""                    ### <path or URL: .fa/.fasta(.gz)>  # Genome FASTA (.gz allowed). Required.
+gtf: ""                      ### <path or URL: .gtf(.gz), or "" if gff is set>  # GTF (.gz allowed). Either gtf or gff is required.
+gff: ""                      ### <path or URL: .gff/.gff3(.gz), or "">  # GFF3, converted to GTF with gffread if gtf is empty
+gene_bed: ""                 ### <path or URL: .bed(.gz), or "">  # BED of genes; built from the GTF (gtf2bed) if empty
+blacklist: ""                ### <path or URL: .bed(.gz), or "">  # BED of regions to exclude (e.g. assets/blacklists/...)
+bwa_index: ""                ### <path or URL: index directory or .tar.gz, or "" to build>  # Index directory or .tar.gz; built if empty
+bowtie2_index: ""            ### <path or URL: index directory or .tar.gz, or "" to build>
+chromap_index: ""            ### <path or URL: chromap .index file (not .tar.gz), or "" to build>
+star_index: ""               ### <path or URL: index directory or .tar.gz, or "" to build>
+save_reference: false        ### [true, false]  # Publish genome/ and genome/index/ under outdir
+macs_gsize: ""               ### <integer, or "" to compute from read_length>  # Effective genome size; computed with khmer from read_length if empty
+read_length: ""              ### [50, 75, 100, 150, 200, ""]  # required when macs_gsize is empty
+
+# ---- Trimming ---------------------------------------------------------------
+clip_r1: ""                  ### <integer, or "" for none>
+clip_r2: ""                  ### <integer, or "" for none>
+three_prime_clip_r1: ""      ### <integer, or "" for none>
+three_prime_clip_r2: ""      ### <integer, or "" for none>
+trim_nextseq: ""             ### <integer (quality cutoff), or "" for none>
+skip_trimming: false         ### [true, false]
+save_trimmed: false          ### [true, false]
+# FASTQ_FASTQC_UMITOOLS_TRIMGALORE min_trimmed_reads (fixed to 10000 in workflows/chipseq.nf)
+min_trimmed_reads: 10000     ### <integer>
+
+# ---- Alignment --------------------------------------------------------------
+aligner: "bwa"               ### ["bwa", "bowtie2", "chromap", "star"]
+seq_center: ""               ### <string, or "">
+bwa_min_score: ""            ### <integer, or "" for the bwa default>
+keep_dups: false             ### [true, false]
+keep_multi_map: false        ### [true, false]
+save_align_intermeds: false  ### [true, false]
+save_unaligned: false        ### [true, false]
+bamtools_filter_pe_config: "assets/bamtools_filter_pe.json"  ### <path to JSON>
+bamtools_filter_se_config: "assets/bamtools_filter_se.json"  ### <path to JSON>
+fragment_size: 200           ### <integer>
+fingerprint_bins: 500000     ### <integer>
+
+# ---- Peak calling -----------------------------------------------------------
+narrow_peak: false           ### [true, false]
+broad_cutoff: 0.1            ### <number>
+macs_fdr: ""                 ### <number, or "" for none>
+macs_pvalue: ""              ### <number, or "" for none>
+min_reps_consensus: 1        ### <integer>
+save_macs_pileup: false      ### [true, false]
+skip_peak_qc: false          ### [true, false]
+skip_peak_annotation: false  ### [true, false]
+skip_consensus_peaks: false  ### [true, false]
+
+# ---- Differential analysis / QC ---------------------------------------------
+deseq2_vst: true             ### [true, false]
+skip_deseq2_qc: false        ### [true, false]
+skip_qc: false               ### [true, false]
+skip_fastqc: false           ### [true, false]
+skip_picard_metrics: false   ### [true, false]
+skip_preseq: false           ### [true, false]
+skip_plot_profile: false     ### [true, false]
+skip_plot_fingerprint: false ### [true, false]
+skip_spp: false              ### [true, false]
+skip_igv: false              ### [true, false]
+skip_multiqc: false          ### [true, false]
+
+# ---- MultiQC ----------------------------------------------------------------
+multiqc_config: ""           ### <path to YAML, or "">  # extra user config, passed with --config
+multiqc_title: ""            ### <string, or "">
+multiqc_logo: ""             ### <path to image, or "">  # accepted for parity; nf-core's local MULTIQC module ignores it
+
+# ---- Fixed tool arguments (conf/modules.config ext.args) --------------------
+# Arguments that depend on params (e.g. BAMTOOLS_FILTER flags, MACS3 --broad)
+# are assembled in the Snakefile from the params above.
+args:
+  fastqc: "--quiet"          ### <string: tool arguments>
+  trimgalore: "--fastqc"     ### <string: tool arguments>
+  bwa_mem: "-M"              ### <string: tool arguments>
+  bwa_mem_samtools: "-bhS -F 0x0100 -O BAM"  ### <string: tool arguments>
+  chromap: "-l 2000 --low-mem --SAM"  ### <string: tool arguments>
+  star_align: "--runMode alignReads --alignIntronMax 1 --alignEndsType EndToEnd --outSAMtype BAM Unsorted --readFilesCommand zcat --runRNGseed 0 --outSAMattributes NH HI AS NM MD"  ### <string: tool arguments>
+  gffread: "--keep-exon-attrs -F -T"  ### <string: tool arguments>
+  picard_mergesamfiles: "--SORT_ORDER coordinate --VALIDATION_STRINGENCY LENIENT --TMP_DIR tmp"  ### <string: tool arguments>
+  picard_markduplicates: "--ASSUME_SORTED true --REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT --TMP_DIR tmp"  ### <string: tool arguments>
+  picard_collectmultiplemetrics: "--VALIDATION_STRINGENCY LENIENT --TMP_DIR tmp"  ### <string: tool arguments>
+  filter_name_sort: "-n"     ### <string: tool arguments>
+  bam_remove_orphans: "--only_fr_pairs"  ### <string: tool arguments>
+  preseq: "-verbose -bam -seed 1"  ### <string: tool arguments>
+  phantompeakqualtools: "--max-ppsize=500000"  ### <string: tool arguments>
+  computematrix: "scale-regions --regionBodyLength 1000 --beforeRegionStartLength 3000 --afterRegionStartLength 3000 --missingDataAsZero --skipZeros --smartLabels"  ### <string: tool arguments>
+  plotfingerprint: "--skipZeros"  ### <string: tool arguments>
+  macs3: "--keep-dup all"    ### <string: tool arguments>
+  frip: "-bed -c -f 0.20"    ### <string: tool arguments>
+  homer_annotatepeaks: "-gid"  ### <string: tool arguments>
+  plot_macs3_qc: "-o ./ -p macs3_peak"  ### <string: tool arguments>
+  plot_homer_annotatepeaks: "-o ./"  ### <string: tool arguments>
+  featurecounts: "-F SAF -O --fracOverlap 0.2"  ### <string: tool arguments>
+  deseq2_qc: "--id_col 1 --sample_suffix '.mLb.clN.sorted.bam' --count_col 7"  ### <string: tool arguments>
+
+# ---- Resources --------------------------------------------------------------
+# conf/base.config labels (attempt 1). mem_mb is also what memory-aware tools
+# (Picard -Xmx, FastQC --memory, STAR genomeGenerate) are told to use.
+resources:
+  process_default: {threads: 1,  mem_mb: 6144}  ### {threads: <integer>, mem_mb: <integer>}
+  process_single:  {threads: 1,  mem_mb: 6144}  ### {threads: <integer>, mem_mb: <integer>}
+  process_low:     {threads: 2,  mem_mb: 12288}  ### {threads: <integer>, mem_mb: <integer>}
+  process_medium:  {threads: 6,  mem_mb: 36864}  ### {threads: <integer>, mem_mb: <integer>}
+  process_high:    {threads: 12, mem_mb: 73728}  ### {threads: <integer>, mem_mb: <integer>}

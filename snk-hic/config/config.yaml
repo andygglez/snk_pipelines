@@ -1,0 +1,101 @@
+# =============================================================================
+# snk-hic — Snakemake port of nf-core/hic
+# Reference implementation: nf-core/hic 2.1.0 (../nfcore-hic)
+# Defaults below mirror nextflow.config / conf/modules.config of that release.
+# Container paths live in config/containers.yaml.
+# =============================================================================
+
+# ---- Input / output ---------------------------------------------------------
+# CSV with header: sample,fastq_1,fastq_2 (several rows per sample = several
+# lanes/runs; each becomes one "chunk"). Paths may be local or http(s)/ftp URLs.
+input: "config/samplesheet.csv"  ### <path to samplesheet CSV>
+outdir: "results"            ### <directory>
+
+# ---- References -------------------------------------------------------------
+fasta: ""                    ### <path or URL: .fa/.fasta(.gz)>  # Genome FASTA (local path or URL). Required.
+bwt2_index: ""               ### <path or URL: bowtie2 index directory, or "" to build>  # Directory with an existing bowtie2 index; built from fasta if empty
+chromosome_size: ""          ### <path or URL: chrom sizes file, or "" to compute>  # Chromosome sizes file; computed from fasta if empty
+restriction_fragments: ""    ### <path or URL: BED, or "" to compute>  # BED of restriction fragments; computed from fasta if empty
+save_reference: false        ### [true, false]  # Keep genome/ (bowtie2 index, sizes, fragments) after the run
+
+# ---- Mapping ----------------------------------------------------------------
+split_fastq: false           ### [true, false]  # Split each FASTQ pair into chunks of fastq_chunks_size reads
+fastq_chunks_size: 20000000  ### <integer (reads per chunk)>
+save_interaction_bam: false  ### [true, false]  # mapped_2hic_fragments.py --sam
+save_aligned_intermediates: false  ### [true, false]
+bwt2_opts_end2end: "--very-sensitive -L 30 --score-min L,-0.6,-0.2 --end-to-end --reorder"  ### <string: bowtie2 arguments>
+bwt2_opts_trimmed: "--very-sensitive -L 20 --score-min L,-0.6,-0.2 --end-to-end --reorder"  ### <string: bowtie2 arguments>
+keep_dups: false             ### [true, false]
+keep_multi: false            ### [true, false]
+min_mapq: 10                 ### <integer>
+
+# ---- Digestion Hi-C ---------------------------------------------------------
+# Either set `digestion` to a key of `digest`, or set both restriction_site and
+# ligation_site, or set dnase: true.
+digestion: ""                ### ["", "hindiii", "mboi", "dpnii", "arima"]
+restriction_site: ""         ### <string, e.g. "^GATC" (comma-separated), or "">
+ligation_site: ""            ### <string, e.g. "GATCGATC" (comma-separated), or "">
+digest:
+  hindiii:
+    restriction_site: "A^AGCTT"  ### <string: restriction motif, ^ = cut site>
+    ligation_site: "AAGCTAGCTT"  ### <string: ligation motif(s), comma-separated>
+  mboi:
+    restriction_site: "^GATC"  ### <string: restriction motif, ^ = cut site>
+    ligation_site: "GATCGATC"  ### <string: ligation motif(s), comma-separated>
+  dpnii:
+    restriction_site: "^GATC"  ### <string: restriction motif, ^ = cut site>
+    ligation_site: "GATCGATC"  ### <string: ligation motif(s), comma-separated>
+  arima:
+    restriction_site: "^GATC,G^ANTC"  ### <string: restriction motif, ^ = cut site>
+    ligation_site: "GATCGATC,GATCANTC,GANTGATC,GANTANTC"  ### <string: ligation motif(s), comma-separated>
+
+min_restriction_fragment_size: 0  ### <integer (0 = no filter)>
+max_restriction_fragment_size: 0  ### <integer (0 = no filter)>
+min_insert_size: 0           ### <integer (0 = no filter)>
+max_insert_size: 0           ### <integer (0 = no filter)>
+save_pairs_intermediates: false  ### [true, false]
+
+# ---- DNase Hi-C -------------------------------------------------------------
+dnase: false                 ### [true, false]
+min_cis_dist: 0              ### <integer (0 = no filter)>
+
+# ---- Contact maps -----------------------------------------------------------
+save_raw_maps: false         ### [true, false]
+bin_size: [1000000]          ### <list of integers (bp)>  # Resolutions for cooler maps
+res_zoomify: null            ### <integer (bp), or null for the smallest bin_size>  # Base resolution of the .mcool; defaults to min of all map resolutions
+hicpro_maps: false           ### [true, false]  # Also build HiC-Pro text matrices + ICE normalisation
+ice_max_iter: 100            ### <integer>
+ice_filter_low_count_perc: 0.02  ### <number (fraction)>
+ice_filter_high_count_perc: 0  ### <number (fraction)>
+ice_eps: 0.1                 ### <number>
+
+# ---- Downstream analysis ----------------------------------------------------
+res_dist_decay: [250000]     ### <list of integers (bp)>
+tads_caller: [insulation]    ### <list, any of: ["insulation", "hicexplorer"]>
+res_tads: [40000]            ### <list of integers (bp)>
+res_compartments: [250000]   ### <list of integers (bp)>
+
+skip_dist_decay: false       ### [true, false]
+skip_compartments: false     ### [true, false]
+skip_tads: false             ### [true, false]
+skip_multiqc: false          ### [true, false]
+
+# ---- Tool arguments (conf/modules.config ext.args) --------------------------
+cooler_cload_args: "pairs -c1 2 -p1 3 -c2 4 -p2 5"  ### <string: tool arguments>
+cooler_balance_args: "--force"  ### <string: tool arguments>
+cooler_dump_args: "--one-based-ids --balanced --na-rep 0"  ### <string: tool arguments>
+cooler_zoomify_args: "--balance"  ### <string: tool arguments>
+cooltools_eigscis_args: "--bigwig"  ### <string: tool arguments>
+cooltools_insulation_args: "15 25 50 --window-pixels"  ### <string: tool arguments>
+hicfindtads_args: "--correctForMultipleTesting fdr"  ### <string: tool arguments>
+samtools_sort_mem: "800M"    ### <memory, e.g. "800M">  # MERGE_BOWTIE2: samtools sort -m
+
+multiqc_config: "config/multiqc_config.yml"  ### <path to YAML>
+
+# ---- Resources (conf/base.config labels) ------------------------------------
+resources:
+  single: {threads: 1,  mem_mb: 6000}  ### {threads: <integer>, mem_mb: <integer>}
+  low:    {threads: 2,  mem_mb: 4000}  ### {threads: <integer>, mem_mb: <integer>}
+  medium: {threads: 6,  mem_mb: 8000}  ### {threads: <integer>, mem_mb: <integer>}
+  high:   {threads: 12, mem_mb: 64000}  ### {threads: <integer>, mem_mb: <integer>}
+  high_memory: {threads: 1, mem_mb: 24000}  ### {threads: <integer>, mem_mb: <integer>}

@@ -1,0 +1,8 @@
+# Scenario D: overlay on config/test_local.yaml (nf-core: nfcore-methylseq/params_D.yaml)
+outdir: "results_D"
+workdir: "work_D"
+skip_deduplication: true
+nomeseq: true
+run_qualimap: true
+save_reference: true
+save_align_intermeds: true

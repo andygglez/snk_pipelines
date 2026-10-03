@@ -1,0 +1,5 @@
+# Scenario H: overlay on config/test_local.yaml (nf-core: nfcore-methylseq/params_H.yaml)
+outdir: "results_H"
+workdir: "work_H"
+bismark_index: "/scratch/andygg98/claude_jobs/methylseq_testdata/Bowtie2_Index.tar.gz"
+run_preseq: true

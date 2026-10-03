@@ -1,0 +1,3 @@
+Config file config/config.yaml is extended by additional config specified via the command line.
+Config file config/containers.yaml is extended by additional config specified via the command line.
+Building DAG of jobs...

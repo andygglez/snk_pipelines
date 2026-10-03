@@ -1,0 +1,237 @@
+Config file config/config.yaml is extended by additional config specified via the command line.
+Config file config/containers.yaml is extended by additional config specified via the command line.
+Assuming unrestricted shared filesystem usage.
+
+SNAKEMAKE
+=========
+  Date: 2026-10-02 10:52:14
+  Workflow ID: bc9ac93f-3f5e-4eba-a473-afaae3d00d34
+  Platform: Linux-7.0.0-34-generic-x86_64-with-glibc2.43
+  Host: andy-bio
+  User: andy
+  Snakemake version: 9.27.0
+  Python version: 3.12.14 (main, Sep  2 2026, 23:27:36) [GCC 15.3.0]
+  Command: /home/andy/programs/anaconda3/envs/nfcore-snk/bin/snakemake --cores 2 --resources mem_mb=4000 --sdm apptainer --configfile config/test.yaml --keep-going
+  Snakefile: /home/andy/MyStuff/PhD/pipelines/snk-hic/Snakefile
+  Base directory: /home/andy/MyStuff/PhD/pipelines/snk-hic
+  Run directory: /home/andy/MyStuff/PhD/pipelines/snk-hic
+  Working directory: /home/andy/MyStuff/PhD/pipelines/snk-hic
+  Config file(s): [PosixPath('/home/andy/MyStuff/PhD/pipelines/snk-hic/config/test.yaml'), 'config/config.yaml', 'config/containers.yaml']
+  Config MD5: 1be3a56dae3b71151c04f2537774c4ee
+
+Building DAG of jobs...
+Using shell: /usr/bin/bash
+Provided cores: 2
+Rules claiming more threads will be scaled down.
+Provided resources: mem_mb=Resource("mem_mb", 4000)
+Job stats:
+job                          count
+-------------------------  -------
+fetch_remote                     3
+samplesheet_check                1
+bowtie2_build                    1
+fastqc                           1
+get_restriction_fragments        1
+getchromsizes                    1
+bowtie2_align                    2
+cooler_makebins                  2
+trim_reads                       2
+bowtie2_align_trimmed            2
+merge_bowtie2                    2
+combine_mates                    1
+merge_mapstats                   2
+get_valid_interaction            1
+merge_pairstats                  1
+merge_rsstats                    1
+merge_valid_interaction          1
+hicpro2pairs                     1
+multiqc                          1
+cooler_cload                     2
+cooler_balance                   2
+cooler_zoomify                   1
+cooler_dump                      2
+cooltools_eigscis                1
+cooltools_insulation             1
+hic_find_tads                    1
+hic_plot_dist_vs_counts          1
+split_cooler_dump                2
+all                              1
+total                           41
+
+Select jobs to execute...
+Execute 2 jobs...
+[Fri Oct  2 10:52:14 2026]
+localrule fetch_remote:
+    output: results_test/inputs/SRR4292758_00_R1.fastq.gz
+    jobid: 3
+    reason: Missing output files: results_test/inputs/SRR4292758_00_R1.fastq.gz
+    wildcards: fname=SRR4292758_00_R1.fastq.gz
+    resources: tmpdir=/tmp
+[Fri Oct  2 10:52:14 2026]
+localrule fetch_remote:
+    output: results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+    jobid: 9
+    reason: Missing output files: results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+    wildcards: fname=W303_SGD_2015_JRIU00000000.fsa
+    resources: tmpdir=/tmp
+Select jobs to execute...
+[Fri Oct  2 10:52:59 2026]
+Finished jobid: 9 (Rule: fetch_remote)
+1 of 41 steps (2%) done
+Execute 1 jobs...
+[Fri Oct  2 10:53:00 2026]
+localrule fetch_remote:
+    output: results_test/inputs/SRR4292758_00_R2.fastq.gz
+    jobid: 4
+    reason: Missing output files: results_test/inputs/SRR4292758_00_R2.fastq.gz
+    wildcards: fname=SRR4292758_00_R2.fastq.gz
+    resources: tmpdir=/tmp
+[Fri Oct  2 10:53:00 2026]
+Finished jobid: 3 (Rule: fetch_remote)
+2 of 41 steps (5%) done
+Select jobs to execute...
+Execute 1 jobs...
+[Fri Oct  2 10:53:00 2026]
+localrule samplesheet_check:
+    input: config/samplesheet.csv
+    output: results_test/pipeline_info/samplesheet.valid.csv
+    jobid: 1
+    reason: Missing output files: results_test/pipeline_info/samplesheet.valid.csv
+    resources: tmpdir=/tmp, mem_mb=4000, mem=4 GB, mem_mib=3815
+Activating singularity image /home/andy/MyStuff/PhD/pipelines/snk-hic/containers/depot.galaxyproject.org-singularity-python-3.8.3.img
+Select jobs to execute...
+RuleException:
+CalledProcessError in file "/home/andy/MyStuff/PhD/pipelines/snk-hic/Snakefile", line 229:
+Command ' apptainer  exec --home '/home/andy/MyStuff/PhD/pipelines/snk-hic'  --bind '/home/andy/.cache/snakemake/snakemake/source-cache' /home/andy/MyStuff/PhD/pipelines/snk-hic/containers/depot.galaxyproject.org-singularity-python-3.8.3.img bash -c 'set -euo pipefail;  python /home/andy/MyStuff/PhD/pipelines/snk-hic/scripts/check_samplesheet.py config/samplesheet.csv results_test/pipeline_info/samplesheet.valid.csv'' returned non-zero exit status 1.
+[Fri Oct  2 10:53:01 2026]
+Error in rule samplesheet_check:
+    message: None
+    jobid: 1
+    input: config/samplesheet.csv
+    output: results_test/pipeline_info/samplesheet.valid.csv
+    shell:
+        python /home/andy/MyStuff/PhD/pipelines/snk-hic/scripts/check_samplesheet.py config/samplesheet.csv results_test/pipeline_info/samplesheet.valid.csv
+        (command exited with non-zero exit code)
+Execute 1 jobs...
+[Fri Oct  2 10:53:01 2026]
+localrule getchromsizes:
+    input: results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+    output: results_test/genome/W303_SGD_2015_JRIU00000000.fsa.sizes, results_test/genome/W303_SGD_2015_JRIU00000000.fsa.fai
+    jobid: 26
+    reason: Missing output files: results_test/genome/W303_SGD_2015_JRIU00000000.fsa.sizes; Input files updated by another job: results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+    resources: tmpdir=/tmp, mem_mb=4000, mem=4 GB, mem_mib=3815
+Activating singularity image /home/andy/MyStuff/PhD/pipelines/snk-hic/containers/depot.galaxyproject.org-singularity-samtools-1.16.1--h6899075_1.img
+RuleException:
+CalledProcessError in file "/home/andy/MyStuff/PhD/pipelines/snk-hic/Snakefile", line 295:
+Command ' apptainer  exec --home '/home/andy/MyStuff/PhD/pipelines/snk-hic'  --bind '/home/andy/.cache/snakemake/snakemake/source-cache' /home/andy/MyStuff/PhD/pipelines/snk-hic/containers/depot.galaxyproject.org-singularity-samtools-1.16.1--h6899075_1.img bash -c 'set -euo pipefail;  
+        samtools faidx --fai-idx results_test/genome/W303_SGD_2015_JRIU00000000.fsa.fai results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+        cut -f 1,2 results_test/genome/W303_SGD_2015_JRIU00000000.fsa.fai > results_test/genome/W303_SGD_2015_JRIU00000000.fsa.sizes'' returned non-zero exit status 1.
+[Fri Oct  2 10:53:01 2026]
+Error in rule getchromsizes:
+    message: None
+    jobid: 26
+    input: results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+    output: results_test/genome/W303_SGD_2015_JRIU00000000.fsa.sizes, results_test/genome/W303_SGD_2015_JRIU00000000.fsa.fai
+    shell:
+        
+        samtools faidx --fai-idx results_test/genome/W303_SGD_2015_JRIU00000000.fsa.fai results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+        cut -f 1,2 results_test/genome/W303_SGD_2015_JRIU00000000.fsa.fai > results_test/genome/W303_SGD_2015_JRIU00000000.fsa.sizes
+        
+        (command exited with non-zero exit code)
+Select jobs to execute...
+Execute 1 jobs...
+[Fri Oct  2 10:53:01 2026]
+localrule bowtie2_build:
+    input: results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+    output: results_test/genome/bowtie2
+    log: results_test/logs/bowtie2_build.log
+    jobid: 8
+    reason: Missing output files: results_test/genome/bowtie2; Input files updated by another job: results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+    resources: tmpdir=/tmp, mem_mb=4000, mem=4 GB, mem_mib=3815
+Activating singularity image /home/andy/MyStuff/PhD/pipelines/snk-hic/containers/depot.galaxyproject.org-singularity-bowtie2-2.4.4--py39hbb4e92a_0.img
+RuleException:
+CalledProcessError in file "/home/andy/MyStuff/PhD/pipelines/snk-hic/Snakefile", line 276:
+Command ' apptainer  exec --home '/home/andy/MyStuff/PhD/pipelines/snk-hic'  --bind '/home/andy/.cache/snakemake/snakemake/source-cache' /home/andy/MyStuff/PhD/pipelines/snk-hic/containers/depot.galaxyproject.org-singularity-bowtie2-2.4.4--py39hbb4e92a_0.img bash -c 'set -euo pipefail;  
+        mkdir -p results_test/genome/bowtie2
+        bowtie2-build --threads 1 results_test/inputs/W303_SGD_2015_JRIU00000000.fsa results_test/genome/bowtie2/W303_SGD_2015_JRIU00000000 > results_test/logs/bowtie2_build.log 2>&1'' returned non-zero exit status 1.
+[Fri Oct  2 10:53:01 2026]
+Error in rule bowtie2_build:
+    message: None
+    jobid: 8
+    input: results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+    output: results_test/genome/bowtie2
+    log: results_test/logs/bowtie2_build.log (check log file(s) for error details)
+    shell:
+        
+        mkdir -p results_test/genome/bowtie2
+        bowtie2-build --threads 1 results_test/inputs/W303_SGD_2015_JRIU00000000.fsa results_test/genome/bowtie2/W303_SGD_2015_JRIU00000000 > results_test/logs/bowtie2_build.log 2>&1
+        
+        (command exited with non-zero exit code)
+Select jobs to execute...
+[Fri Oct  2 10:53:06 2026]
+Finished jobid: 4 (Rule: fetch_remote)
+3 of 41 steps (7%) done
+Execute 1 jobs...
+[Fri Oct  2 10:53:06 2026]
+localrule get_restriction_fragments:
+    input: results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+    output: results_test/genome/restriction_fragments.bed
+    jobid: 18
+    reason: Missing output files: results_test/genome/restriction_fragments.bed; Input files updated by another job: results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+    threads: 2
+    resources: tmpdir=/tmp, mem_mb=4000, mem=4 GB, mem_mib=3815
+Activating singularity image /home/andy/MyStuff/PhD/pipelines/snk-hic/containers/depot.galaxyproject.org-singularity-mulled-v2-c6ff206325681cbb9c9ef890bb8de554172c0483-713df51cd897ceb893b9a6e6420f527d83c2ed95-0.img
+RuleException:
+CalledProcessError in file "/home/andy/MyStuff/PhD/pipelines/snk-hic/Snakefile", line 315:
+Command ' apptainer  exec --home '/home/andy/MyStuff/PhD/pipelines/snk-hic'  --bind '/home/andy/.cache/snakemake/snakemake/source-cache' /home/andy/MyStuff/PhD/pipelines/snk-hic/containers/depot.galaxyproject.org-singularity-mulled-v2-c6ff206325681cbb9c9ef890bb8de554172c0483-713df51cd897ceb893b9a6e6420f527d83c2ed95-0.img bash -c 'set -euo pipefail;  python /home/andy/MyStuff/PhD/pipelines/snk-hic/scripts/digest_genome.py -r '\''A^AGCTT'\'' -o results_test/genome/restriction_fragments.bed results_test/inputs/W303_SGD_2015_JRIU00000000.fsa'' returned non-zero exit status 1.
+[Fri Oct  2 10:53:06 2026]
+Error in rule get_restriction_fragments:
+    message: None
+    jobid: 18
+    input: results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+    output: results_test/genome/restriction_fragments.bed
+    shell:
+        python /home/andy/MyStuff/PhD/pipelines/snk-hic/scripts/digest_genome.py -r 'A^AGCTT' -o results_test/genome/restriction_fragments.bed results_test/inputs/W303_SGD_2015_JRIU00000000.fsa
+        (command exited with non-zero exit code)
+Select jobs to execute...
+Execute 1 jobs...
+[Fri Oct  2 10:53:06 2026]
+localrule fastqc:
+    input: results_test/inputs/SRR4292758_00_R1.fastq.gz, results_test/inputs/SRR4292758_00_R2.fastq.gz
+    output: results_test/fastqc/SRR4292758_0_1_fastqc.html, results_test/fastqc/SRR4292758_0_1_fastqc.zip, results_test/fastqc/SRR4292758_0_2_fastqc.html, results_test/fastqc/SRR4292758_0_2_fastqc.zip
+    log: results_test/logs/fastqc/SRR4292758_0.log
+    jobid: 2
+    reason: Missing output files: results_test/fastqc/SRR4292758_0_1_fastqc.html, results_test/fastqc/SRR4292758_0_2_fastqc.zip, results_test/fastqc/SRR4292758_0_1_fastqc.zip, results_test/fastqc/SRR4292758_0_2_fastqc.html; Input files updated by another job: results_test/inputs/SRR4292758_00_R1.fastq.gz, results_test/inputs/SRR4292758_00_R2.fastq.gz
+    wildcards: sample=SRR4292758, chunk=0
+    threads: 2
+    resources: tmpdir=/tmp, mem_mb=4000, mem=4 GB, mem_mib=3815
+Activating singularity image /home/andy/MyStuff/PhD/pipelines/snk-hic/containers/depot.galaxyproject.org-singularity-fastqc-0.11.9--0.img
+RuleException:
+CalledProcessError in file "/home/andy/MyStuff/PhD/pipelines/snk-hic/Snakefile", line 340:
+Command ' apptainer  exec --home '/home/andy/MyStuff/PhD/pipelines/snk-hic'  --bind '/home/andy/.cache/snakemake/snakemake/source-cache' /home/andy/MyStuff/PhD/pipelines/snk-hic/containers/depot.galaxyproject.org-singularity-fastqc-0.11.9--0.img bash -c 'set -euo pipefail;  
+        tmp=$(mktemp -d)
+        ln -s $(realpath results_test/inputs/SRR4292758_00_R1.fastq.gz) $tmp/SRR4292758_0_1.fastq.gz
+        ln -s $(realpath results_test/inputs/SRR4292758_00_R2.fastq.gz) $tmp/SRR4292758_0_2.fastq.gz
+        fastqc --threads 2 -o $(dirname results_test/fastqc/SRR4292758_0_1_fastqc.html)             $tmp/SRR4292758_0_1.fastq.gz             $tmp/SRR4292758_0_2.fastq.gz > results_test/logs/fastqc/SRR4292758_0.log 2>&1
+        rm -rf $tmp'' returned non-zero exit status 1.
+[Fri Oct  2 10:53:06 2026]
+Error in rule fastqc:
+    message: None
+    jobid: 2
+    input: results_test/inputs/SRR4292758_00_R1.fastq.gz, results_test/inputs/SRR4292758_00_R2.fastq.gz
+    output: results_test/fastqc/SRR4292758_0_1_fastqc.html, results_test/fastqc/SRR4292758_0_1_fastqc.zip, results_test/fastqc/SRR4292758_0_2_fastqc.html, results_test/fastqc/SRR4292758_0_2_fastqc.zip
+    log: results_test/logs/fastqc/SRR4292758_0.log (check log file(s) for error details)
+    shell:
+        
+        tmp=$(mktemp -d)
+        ln -s $(realpath results_test/inputs/SRR4292758_00_R1.fastq.gz) $tmp/SRR4292758_0_1.fastq.gz
+        ln -s $(realpath results_test/inputs/SRR4292758_00_R2.fastq.gz) $tmp/SRR4292758_0_2.fastq.gz
+        fastqc --threads 2 -o $(dirname results_test/fastqc/SRR4292758_0_1_fastqc.html)             $tmp/SRR4292758_0_1.fastq.gz             $tmp/SRR4292758_0_2.fastq.gz > results_test/logs/fastqc/SRR4292758_0.log 2>&1
+        rm -rf $tmp
+        
+        (command exited with non-zero exit code)
+Exiting because a job execution failed. Look above for error messages
+Complete log(s): /home/andy/MyStuff/PhD/pipelines/snk-hic/.snakemake/log/2026-10-02T105214.214717.snakemake.log
+Elapsed time: 0:00:52.522794
+WorkflowError:
+At least one job did not complete successfully.

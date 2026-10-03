@@ -1,0 +1,56 @@
+# Singularity images used by each rule. Paths are relative to snk-methylseq/ (or absolute).
+# Each is the image the matching nf-core/methylseq 4.2.0 module pins
+# (modules/nf-core/*/main.nf, https singularity URL), downloaded into containers/
+# under the file name Nextflow gives it in NXF_SINGULARITY_CACHEDIR.
+# Not listed: PARABRICKS_FQ2BAMMETH (GPU only, not ported) and
+# QUALIMAP_BAMQCCRAM (never called by the pipeline).
+containers:
+  # BISMARK_GENOMEPREPARATION, BISMARK_ALIGN, BISMARK_DEDUPLICATE,
+  # BISMARK_METHYLATIONEXTRACTOR, BISMARK_COVERAGE2CYTOSINE, BISMARK_REPORT, BISMARK_SUMMARY
+  bismark: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-38-38e61d14ccaed82f60c967132963eb467d0fa4bccb7a21404c49b4f377735f03-data.img
+  # CAT_FASTQ, GUNZIP, UNTAR
+  coreutils: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-52-52ccce28d2ab928ab862e25aae26314d69c8e38bd41ca9431c67ef05221348aa-data.img
+  # FASTQC
+  fastqc: containers/depot.galaxyproject.org-singularity-fastqc-0.12.1--hdfd78af_0.img
+  # TRIMGALORE
+  trimgalore: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-9b-9becad054093ad4083a961d12733f2a742e11728fe9aa815d678b882b3ede520-data.img
+  # SAMTOOLS_FAIDX/SORT/INDEX/STATS/FLAGSTAT/IDXSTATS
+  samtools: containers/depot.galaxyproject.org-singularity-samtools-1.22.1--h96c455f_0.img
+  # BWAMETH_INDEX, BWAMETH_ALIGN
+  bwameth: containers/depot.galaxyproject.org-singularity-bwameth-0.2.9--pyh7e72e81_0.img
+  # BWA_INDEX, BWA_MEM
+  bwa: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-d7-d7e24dc1e4d93ca4d3a76a78d4c834a7be3985b0e1e56fddd61662e047863a8a-data.img
+  # PICARD_MARKDUPLICATES, PICARD_ADDORREPLACEREADGROUPS, PICARD_CREATESEQUENCEDICTIONARY,
+  # PICARD_BEDTOINTERVALLIST
+  picard: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-08-0861295baa7c01fc593a9da94e82b44a729dcaf8da92be8e565da109aa549b25-data.img
+  # METHYLDACKEL_EXTRACT, METHYLDACKEL_MBIAS
+  methyldackel: containers/depot.galaxyproject.org-singularity-methyldackel-0.6.1--he4a0461_7.img
+  # RASTAIR_MBIAS, RASTAIR_MBIASPARSER, RASTAIR_CALL, RASTAIR_METHYLKIT
+  rastair: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-15-15120636da858ba73a2493281bfa418005f08c0ed09369a837c05f3f9e14a4a6-data.img
+  # PRESEQ_LCEXTRAP
+  preseq: containers/depot.galaxyproject.org-singularity-preseq-3.2.0--hdcf5f25_6.img
+  # QUALIMAP_BAMQC
+  qualimap: containers/depot.galaxyproject.org-singularity-qualimap-2.3--hdfd78af_0.img
+  # BEDTOOLS_INTERSECT
+  bedtools: containers/depot.galaxyproject.org-singularity-bedtools-2.31.1--hf5e1c6e_0.img
+  # MULTIQC
+  multiqc: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-8c-8c6c120d559d7ee04c7442b61ad7cf5a9e8970be5feefb37d68eeaa60c1034eb-data.img
+
+# Where each image above comes from (the URL the nf-core module pins).
+# `pipeline pull <name>` downloads any missing image from here; it has no
+# effect on runs. Compute nodes are offline, so pull on a login node first.
+container_urls:
+  bismark: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/38/38e61d14ccaed82f60c967132963eb467d0fa4bccb7a21404c49b4f377735f03/data
+  coreutils: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/52/52ccce28d2ab928ab862e25aae26314d69c8e38bd41ca9431c67ef05221348aa/data
+  fastqc: https://depot.galaxyproject.org/singularity/fastqc:0.12.1--hdfd78af_0
+  trimgalore: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/9b/9becad054093ad4083a961d12733f2a742e11728fe9aa815d678b882b3ede520/data
+  samtools: https://depot.galaxyproject.org/singularity/samtools:1.22.1--h96c455f_0
+  bwameth: https://depot.galaxyproject.org/singularity/bwameth:0.2.9--pyh7e72e81_0
+  bwa: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/d7/d7e24dc1e4d93ca4d3a76a78d4c834a7be3985b0e1e56fddd61662e047863a8a/data
+  picard: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/08/0861295baa7c01fc593a9da94e82b44a729dcaf8da92be8e565da109aa549b25/data
+  methyldackel: https://depot.galaxyproject.org/singularity/methyldackel:0.6.1--he4a0461_7
+  rastair: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/15/15120636da858ba73a2493281bfa418005f08c0ed09369a837c05f3f9e14a4a6/data
+  preseq: https://depot.galaxyproject.org/singularity/preseq:3.2.0--hdcf5f25_6
+  qualimap: https://depot.galaxyproject.org/singularity/qualimap:2.3--hdfd78af_0
+  bedtools: https://depot.galaxyproject.org/singularity/bedtools:2.31.1--hf5e1c6e_0
+  multiqc: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/8c/8c6c120d559d7ee04c7442b61ad7cf5a9e8970be5feefb37d68eeaa60c1034eb/data

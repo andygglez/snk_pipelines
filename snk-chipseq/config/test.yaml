@@ -1,0 +1,21 @@
+# Minimal test profile — mirrors nf-core/chipseq 2.1.0 conf/test.config
+# (S. cerevisiae SPT5 ChIP-seq subset: 2 IP groups x 2 replicates + 2 inputs, paired-end).
+# Usage: snakemake --cores 2 --sdm apptainer --configfile config/test.yaml
+input: "config/samplesheet.csv"   # copy of samplesheet/v2.1/samplesheet_test.csv
+outdir: "results_test"
+workdir: "work_test"
+
+fasta: "https://raw.githubusercontent.com/nf-core/test-datasets/atacseq/reference/genome.fa"
+gtf: "https://raw.githubusercontent.com/nf-core/test-datasets/atacseq/reference/genes.gtf"
+read_length: 50
+
+fingerprint_bins: 100
+skip_preseq: true
+
+# test profile: max_cpus 2, max_memory 6.GB
+resources:
+  process_default: {threads: 1, mem_mb: 6144}
+  process_single:  {threads: 1, mem_mb: 6144}
+  process_low:     {threads: 2, mem_mb: 6144}
+  process_medium:  {threads: 2, mem_mb: 6144}
+  process_high:    {threads: 2, mem_mb: 6144}

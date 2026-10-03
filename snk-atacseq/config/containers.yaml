@@ -1,0 +1,110 @@
+# Singularity images used by each rule. Paths are relative to snk-atacseq/ (or absolute).
+# Each is the image the matching nf-core/atacseq 2.1.2 module pins
+# (modules/*/main.nf, https singularity URL), downloaded into containers/.
+# Not listed: UMITOOLS_EXTRACT (atacseq never runs UMI extraction) and
+# CUSTOM_DUMPSOFTWAREVERSIONS (multiqc 1.14; software versions are not produced).
+containers:
+  # SAMPLESHEET_CHECK, GET_AUTOSOMES, IGV
+  python: containers/depot.galaxyproject.org-singularity-python-3.8.3.img
+  # GUNZIP_*, UNTAR_*, TSS_EXTRACT, MULTIQC_CUSTOM_PEAKS
+  ubuntu20: containers/depot.galaxyproject.org-singularity-ubuntu-20.04.img
+  # GFFREAD
+  gffread: containers/depot.galaxyproject.org-singularity-gffread-0.12.1--h8b12597_0.img
+  # GTF2BED
+  perl: containers/depot.galaxyproject.org-singularity-perl-5.26.2.img
+  # CUSTOM_GETCHROMSIZES
+  getchromsizes: containers/depot.galaxyproject.org-singularity-samtools-1.16.1--h6899075_1.img
+  # SAMTOOLS_SORT/INDEX/STATS/FLAGSTAT/IDXSTATS
+  samtools: containers/depot.galaxyproject.org-singularity-samtools-1.17--h00cdaf9_0.img
+  # GENOME_BLACKLIST_REGIONS, BEDTOOLS_GENOMECOV
+  bedtools: containers/depot.galaxyproject.org-singularity-bedtools-2.30.0--hc088bd4_0.img
+  # BWA_INDEX
+  bwa_index: containers/depot.galaxyproject.org-singularity-bwa-0.7.17--hed695b0_7.img
+  # BWA_MEM (bwa + samtools)
+  bwa_mem: containers/depot.galaxyproject.org-singularity-mulled-v2-fe8faa35dbf6dc65a0f7f5d4ea12e31a79f73e40-219b6c272b25e7e642ae3ff0bf0c5c81a5135ab4-0.img
+  # BOWTIE2_BUILD
+  bowtie2_build: containers/depot.galaxyproject.org-singularity-bowtie2-2.4.4--py39hbb4e92a_0.img
+  # BOWTIE2_ALIGN (bowtie2 + samtools)
+  bowtie2_align: containers/depot.galaxyproject.org-singularity-mulled-v2-ac74a7f02cebcfcc07d8e8d1d750af9c83b4d45a-a0ffedb52808e102887f6ce600d092675bf3528a-0.img
+  # CHROMAP_INDEX
+  chromap_index: containers/depot.galaxyproject.org-singularity-chromap-0.2.4--hd03093a_0.img
+  # CHROMAP_CHROMAP (chromap + samtools)
+  chromap: containers/depot.galaxyproject.org-singularity-mulled-v2-1f09f39f20b1c4ee36581dc81cc323c70e661633-5b2e433ab8b3d1ef098fc944b567fd98caa23f56-0.img
+  # STAR_GENOMEGENERATE (star 2.6.1d + samtools + gawk)
+  star_genomegenerate: containers/depot.galaxyproject.org-singularity-mulled-v2-1fa26d1ce03c295fe2fdcf85831a92fbcbd7e8c2-59cdd445419f14abac76b31dd0d71217994cbcc9-0.img
+  # STAR_ALIGN
+  star: containers/depot.galaxyproject.org-singularity-star-2.6.1d--0.img
+  # FASTQC
+  fastqc: containers/depot.galaxyproject.org-singularity-fastqc-0.11.9--0.img
+  # TRIMGALORE
+  trimgalore: containers/depot.galaxyproject.org-singularity-trim-galore-0.6.7--hdfd78af_0.img
+  # PICARD_MERGESAMFILES_*, PICARD_MARKDUPLICATES, PICARD_COLLECTMULTIPLEMETRICS
+  picard: containers/depot.galaxyproject.org-singularity-picard-3.0.0--hdfd78af_1.img
+  # BAMTOOLS_FILTER (bamtools + samtools)
+  bamtools: containers/depot.galaxyproject.org-singularity-mulled-v2-0560a8046fc82aa4338588eca29ff18edab2c5aa-5687a7da26983502d0a8a9a6b05ed727c740ddc4-0.img
+  # BAM_REMOVE_ORPHANS (pysam + samtools)
+  pysam: containers/depot.galaxyproject.org-singularity-mulled-v2-57736af1eb98c01010848572c9fec9fff6ffaafd-402e865b8f6af2f3e58c6fc8d57127ff0144b2c7-0.img
+  # PRESEQ_LCEXTRAP
+  preseq: containers/depot.galaxyproject.org-singularity-preseq-3.1.2--h445547b_2.img
+  # UCSC_BEDGRAPHTOBIGWIG
+  bedgraphtobigwig: containers/depot.galaxyproject.org-singularity-ucsc-bedgraphtobigwig-445--h954228d_0.img
+  # DEEPTOOLS_COMPUTEMATRIX, DEEPTOOLS_PLOTPROFILE, DEEPTOOLS_PLOTHEATMAP, DEEPTOOLS_PLOTFINGERPRINT
+  deeptools: containers/depot.galaxyproject.org-singularity-deeptools-3.5.1--py_0.img
+  # KHMER_UNIQUEKMERS
+  khmer: containers/depot.galaxyproject.org-singularity-khmer-3.0.0a3--py37haa7609a_2.img
+  # MACS2_CALLPEAK
+  macs2: containers/depot.galaxyproject.org-singularity-macs2-2.2.7.1--py38h4a8c8d9_3.img
+  # FRIP_SCORE (bedtools + samtools)
+  frip: containers/depot.galaxyproject.org-singularity-mulled-v2-8186960447c5cb2faa697666dc1e6d919ad23f3e-3127fcae6b6bdaf8181e21a26ae61231030a9fcb-0.img
+  # HOMER_ANNOTATEPEAKS
+  homer: containers/depot.galaxyproject.org-singularity-homer-4.11--pl526hc9558a2_3.img
+  # PLOT_MACS2_QC, PLOT_HOMER_ANNOTATEPEAKS (R 4.0.3 + tidyverse + ComplexHeatmap)
+  rplots: containers/depot.galaxyproject.org-singularity-mulled-v2-ad9dd5f398966bf899ae05f8e7c54d0fb10cdfa7-05678da05b8e5a7a5130e90a9f9a6c585b965afa-0.img
+  # MACS2_CONSENSUS (biopython + R optparse/UpSetR + bedtools)
+  consensus: containers/depot.galaxyproject.org-singularity-mulled-v2-2f48cc59b03027e31ead6d383fe1b8057785dd24-5d182f583f4696f4c4d9f3be93052811b383341f-0.img
+  # SUBREAD_FEATURECOUNTS
+  subread: containers/depot.galaxyproject.org-singularity-subread-2.0.1--hed695b0_0.img
+  # DESEQ2_QC
+  deseq2: containers/depot.galaxyproject.org-singularity-mulled-v2-8849acf39a43cdd6c839a369a74c0adc823e2f91-ab110436faf952a33575c64dd74615a84011450b-0.img
+  # ATAQV_ATAQV, ATAQV_MKARV
+  ataqv: containers/depot.galaxyproject.org-singularity-ataqv-1.3.1--py310ha155cf9_1.img
+  # MULTIQC (local module)
+  multiqc: containers/depot.galaxyproject.org-singularity-multiqc-1.13--pyhdfd78af_0.img
+
+# Where each image above comes from (the URL the nf-core module pins).
+# `pipeline pull <name>` downloads any missing image from here; it has no
+# effect on runs. Compute nodes are offline, so pull on a login node first.
+container_urls:
+  python: https://depot.galaxyproject.org/singularity/python:3.8.3
+  ubuntu20: https://depot.galaxyproject.org/singularity/ubuntu:20.04
+  gffread: https://depot.galaxyproject.org/singularity/gffread:0.12.1--h8b12597_0
+  perl: https://depot.galaxyproject.org/singularity/perl:5.26.2
+  getchromsizes: https://depot.galaxyproject.org/singularity/samtools:1.16.1--h6899075_1
+  samtools: https://depot.galaxyproject.org/singularity/samtools:1.17--h00cdaf9_0
+  bedtools: https://depot.galaxyproject.org/singularity/bedtools:2.30.0--hc088bd4_0
+  bwa_index: https://depot.galaxyproject.org/singularity/bwa:0.7.17--hed695b0_7
+  bwa_mem: https://depot.galaxyproject.org/singularity/mulled-v2-fe8faa35dbf6dc65a0f7f5d4ea12e31a79f73e40:219b6c272b25e7e642ae3ff0bf0c5c81a5135ab4-0
+  bowtie2_build: https://depot.galaxyproject.org/singularity/bowtie2:2.4.4--py39hbb4e92a_0
+  bowtie2_align: https://depot.galaxyproject.org/singularity/mulled-v2-ac74a7f02cebcfcc07d8e8d1d750af9c83b4d45a:a0ffedb52808e102887f6ce600d092675bf3528a-0
+  chromap_index: https://depot.galaxyproject.org/singularity/chromap:0.2.4--hd03093a_0
+  chromap: https://depot.galaxyproject.org/singularity/mulled-v2-1f09f39f20b1c4ee36581dc81cc323c70e661633:5b2e433ab8b3d1ef098fc944b567fd98caa23f56-0
+  star_genomegenerate: https://depot.galaxyproject.org/singularity/mulled-v2-1fa26d1ce03c295fe2fdcf85831a92fbcbd7e8c2:59cdd445419f14abac76b31dd0d71217994cbcc9-0
+  star: https://depot.galaxyproject.org/singularity/star:2.6.1d--0
+  fastqc: https://depot.galaxyproject.org/singularity/fastqc:0.11.9--0
+  trimgalore: https://depot.galaxyproject.org/singularity/trim-galore:0.6.7--hdfd78af_0
+  picard: https://depot.galaxyproject.org/singularity/picard:3.0.0--hdfd78af_1
+  bamtools: https://depot.galaxyproject.org/singularity/mulled-v2-0560a8046fc82aa4338588eca29ff18edab2c5aa:5687a7da26983502d0a8a9a6b05ed727c740ddc4-0
+  pysam: https://depot.galaxyproject.org/singularity/mulled-v2-57736af1eb98c01010848572c9fec9fff6ffaafd:402e865b8f6af2f3e58c6fc8d57127ff0144b2c7-0
+  preseq: https://depot.galaxyproject.org/singularity/preseq:3.1.2--h445547b_2
+  bedgraphtobigwig: https://depot.galaxyproject.org/singularity/ucsc-bedgraphtobigwig:445--h954228d_0
+  deeptools: https://depot.galaxyproject.org/singularity/deeptools:3.5.1--py_0
+  khmer: https://depot.galaxyproject.org/singularity/khmer:3.0.0a3--py37haa7609a_2
+  macs2: https://depot.galaxyproject.org/singularity/macs2:2.2.7.1--py38h4a8c8d9_3
+  frip: https://depot.galaxyproject.org/singularity/mulled-v2-8186960447c5cb2faa697666dc1e6d919ad23f3e:3127fcae6b6bdaf8181e21a26ae61231030a9fcb-0
+  homer: https://depot.galaxyproject.org/singularity/homer:4.11--pl526hc9558a2_3
+  rplots: https://depot.galaxyproject.org/singularity/mulled-v2-ad9dd5f398966bf899ae05f8e7c54d0fb10cdfa7:05678da05b8e5a7a5130e90a9f9a6c585b965afa-0
+  consensus: https://depot.galaxyproject.org/singularity/mulled-v2-2f48cc59b03027e31ead6d383fe1b8057785dd24:5d182f583f4696f4c4d9f3be93052811b383341f-0
+  subread: https://depot.galaxyproject.org/singularity/subread:2.0.1--hed695b0_0
+  deseq2: https://depot.galaxyproject.org/singularity/mulled-v2-8849acf39a43cdd6c839a369a74c0adc823e2f91:ab110436faf952a33575c64dd74615a84011450b-0
+  ataqv: https://depot.galaxyproject.org/singularity/ataqv:1.3.1--py310ha155cf9_1
+  multiqc: https://depot.galaxyproject.org/singularity/multiqc:1.13--pyhdfd78af_0

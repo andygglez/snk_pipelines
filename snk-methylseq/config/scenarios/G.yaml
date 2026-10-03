@@ -1,0 +1,8 @@
+# Scenario G: overlay on config/test_local.yaml (nf-core: nfcore-methylseq/params_G.yaml)
+outdir: "results_G"
+workdir: "work_G"
+input: "config/samplesheet_replicates_local.csv"
+skip_trimming: true
+run_targeted_sequencing: true
+collecthsmetrics: true
+target_regions_file: "assets/genome_target_regions.bed"

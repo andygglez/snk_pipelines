@@ -1,0 +1,9 @@
+# Scenario F: overlay on config/test_local.yaml (nf-core: nfcore-methylseq/params_F.yaml)
+outdir: "results_F"
+workdir: "work_F"
+aligner: "bwameth"
+all_contexts: true
+run_targeted_sequencing: true
+collecthsmetrics: true
+save_reference: true
+target_regions_file: "assets/genome_target_regions.bed"

@@ -1,0 +1,2475 @@
+# =============================================================================
+# snk-chipseq — Snakemake port of nf-core/chipseq 2.1.0
+#
+# Every rule mirrors one nf-core process (named in the comment above each rule)
+# and runs inside the same Singularity image the nf-core module uses
+# (see config/containers.yaml). nf-core bin/ scripts live in scripts/. Published
+# files follow the nf-core publishDir layout under `outdir`; files nf-core keeps
+# only in its work/ directory go to `workdir`.
+#
+# Ported: the whole workflow, with all four aligners (bwa, bowtie2, chromap,
+# star), MACS3 broad/narrow peaks, HOMER annotation, consensus peaks,
+# featureCounts, DESeq2 QC, IGV session and MultiQC.
+# Not ported (rejected at start-up): iGenomes (`genome`), a .tar.gz chromap index.
+# Not produced: Nextflow run metadata (pipeline_info execution reports, software
+# versions YAML, MultiQC workflow summary / versions sections).
+#
+# Rules run in shadow directories with their inputs linked under the file names
+# Nextflow stages, so file names embedded in outputs (BAM @PG lines, samtools
+# stats, MACS3 .xls, featureCounts columns, HOMER headers) match nf-core.
+#
+# Run:  snakemake --cores N --sdm apptainer
+# =============================================================================
+
+import json
+import os
+import re
+import sys
+import tempfile
+import urllib.request
+from collections import Counter, OrderedDict
+
+configfile: "config/config.yaml"
+configfile: "config/containers.yaml"
+
+SCRIPTS = os.path.join(workflow.basedir, "scripts")
+ASSETS = os.path.join(workflow.basedir, "assets")
+sys.path.insert(0, SCRIPTS)
+from chipseq_utils import (  # noqa: E402
+    read_validated_samplesheet,
+    strip_rep,
+    strip_run,
+    trimgalore_reads_after_filtering,
+)
+import check_samplesheet  # noqa: E402
+
+O = config["outdir"].rstrip("/")
+W = config["workdir"].rstrip("/")
+
+# nextflow.config env{} and process.shell (bash -e -u -o pipefail).
+# HPC hosts (Lmod) export a `which` shell function that leaks into containers
+# and breaks `which` there; drop it.
+shell.prefix(
+    "set -euo pipefail; unset -f which 2>/dev/null || true; export PYTHONNOUSERSITE=1 R_PROFILE_USER=/.Rprofile "
+    "R_ENVIRON_USER=/.Renviron JULIA_DEPOT_PATH=/usr/local/share/julia "
+    "MPLCONFIGDIR=${{TMPDIR:-/tmp}}/mplcfg; "
+)
+
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def container_path(key):
+    path = config["containers"][key]
+    return path if os.path.isabs(path) else os.path.join(workflow.basedir, path)
+
+
+def asset_path(path):
+    if os.path.isabs(path) or os.path.exists(path):
+        return path
+    return os.path.join(workflow.basedir, path)
+
+
+def res(label):
+    return config["resources"][label]
+
+
+def flag(key):
+    return bool(config.get(key))
+
+
+def param(key):
+    """A nf-core param that defaults to null ("" or missing here -> None)."""
+    value = config.get(key)
+    return None if value in ("", None) else value
+
+
+def gt0(key):
+    """Groovy `params.x > 0` with a null param."""
+    value = param(key)
+    return value is not None and float(value) > 0
+
+
+def args(key):
+    return config["args"][key]
+
+
+def join_args(parts):
+    return " ".join(parts).strip()
+
+
+def picard_mem(resources):
+    """avail_mem = (task.memory.mega * 0.8).intValue()"""
+    return int(resources.mem_mb * 0.8)
+
+
+def is_url(path):
+    return str(path).startswith(("http://", "https://", "ftp://"))
+
+
+def basename_noext(path):
+    """Nextflow Path.baseName: file name without its last extension."""
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def simple_name(path):
+    """Nextflow Path.simpleName: file name up to the first dot."""
+    return os.path.basename(path).split(".")[0]
+
+
+def alternation(names):
+    names = list(names)
+    return "|".join(re.escape(n) for n in names) if names else "(?!x)x"
+
+
+# Remote inputs (FASTQ / reference URLs) are staged into {W}/inputs/ by
+# fetch_remote, the equivalent of Nextflow's automatic staging of remote files.
+REMOTE = {}
+
+
+def stage(path):
+    if not path or not is_url(path):
+        return path
+    name = os.path.basename(path)
+    if REMOTE.get(name, path) != path:
+        raise ValueError(f"Two remote inputs share the file name {name!r}.")
+    REMOTE[name] = path
+    return f"{W}/inputs/{name}"
+
+
+def read_text(path):
+    if is_url(path):
+        with urllib.request.urlopen(path) as fh:
+            return fh.read().decode()
+    with open(path) as fh:
+        return fh.read()
+
+
+# -----------------------------------------------------------------------------
+# Parameter validation (utils_nfcore_chipseq_pipeline: validateInputParameters)
+# -----------------------------------------------------------------------------
+ALIGNER = config["aligner"]
+if ALIGNER not in ("bwa", "bowtie2", "chromap", "star"):
+    raise ValueError(f"aligner must be bwa, bowtie2, chromap or star (got {ALIGNER!r}).")
+if param("genome"):
+    raise ValueError("iGenomes (`genome`) is not ported to snk-chipseq; give `fasta` and `gtf` explicitly.")
+if not param("fasta"):
+    raise ValueError("`fasta` is required.")
+if not param("gtf") and not param("gff"):
+    raise ValueError("No GTF or GFF3 annotation specified (`gtf` or `gff`).")
+if not param("macs_gsize") and not param("read_length"):
+    raise ValueError("Either `macs_gsize` or `read_length` (for khmer unique-kmers) is required.")
+if param("chromap_index") and str(config["chromap_index"]).endswith(".tar.gz"):
+    raise ValueError("A .tar.gz chromap index (UNTARFILES) is not ported; give the .index file.")
+
+NARROW = flag("narrow_peak")
+PEAK_TYPE = "narrow_peak" if NARROW else "broad_peak"
+PEAK_EXT = "narrowPeak" if NARROW else "broadPeak"
+SAVE_REF = flag("save_reference")
+SAVE_ALIGN = flag("save_align_intermeds")
+SAVE_UNALIGNED = flag("save_unaligned")
+SKIP_TRIM = flag("skip_trimming")
+SKIP_FASTQC = flag("skip_fastqc") or flag("skip_qc")
+SKIP_ANNOT = flag("skip_peak_annotation")
+
+GENOME_DIR = f"{O}/genome" if SAVE_REF else f"{W}/genome"
+INDEX_DIR = f"{O}/genome/index" if SAVE_REF else f"{W}/genome/index"
+AL = f"{O}/{ALIGNER}"
+ML = f"{AL}/merged_library"
+MACS = f"{ML}/macs3/{PEAK_TYPE}"
+LIB_DIR = f"{AL}/library" if SAVE_ALIGN else f"{W}/{ALIGNER}/library"
+MRG_DIR = ML if SAVE_ALIGN else f"{W}/{ALIGNER}/merged_library"
+TRIM_DIR = f"{O}/trimgalore" if flag("save_trimmed") else f"{W}/trimgalore"
+
+# -----------------------------------------------------------------------------
+# Reference files (PREPARE_GENOME)
+# -----------------------------------------------------------------------------
+GUNZIP_SRC = {}  # GUNZIP_*: output name in GENOME_DIR -> .gz source
+
+
+def gunzipped(path):
+    """Return the path a reference ends up at after (optional) GUNZIP."""
+    path = stage(path)
+    if not path.endswith(".gz"):
+        return path
+    name = os.path.basename(path)[:-3]
+    GUNZIP_SRC[name] = path
+    return f"{GENOME_DIR}/{name}"
+
+
+FASTA = gunzipped(config["fasta"])
+FASTA_NAME = os.path.basename(FASTA)
+FAI = f"{O}/genome/{FASTA_NAME}.fai"      # CUSTOM_GETCHROMSIZES (always published)
+SIZES = f"{O}/genome/{FASTA_NAME}.sizes"
+
+if param("gtf"):
+    GTF = gunzipped(config["gtf"])
+    GFF = None
+else:
+    GFF = gunzipped(config["gff"])
+    # GFFREAD is called with meta [:], so its prefix is the string "null".
+    GTF = f"{GENOME_DIR}/null.gtf"
+GTF_NAME = os.path.basename(GTF)
+
+BLACKLIST = gunzipped(config["blacklist"]) if param("blacklist") else None
+GENE_BED = gunzipped(config["gene_bed"]) if param("gene_bed") else f"{GENOME_DIR}/{basename_noext(GTF)}.bed"
+GENE_BED_NAME = os.path.basename(GENE_BED)
+FILTERED_BED = f"{GENOME_DIR}/{simple_name(SIZES)}.include_regions.bed"
+
+# Indices: provided directory/file, .tar.gz (UNTAR_*), or built.
+UNTAR_SRC = {}  # UNTAR_*: output name in INDEX_DIR -> .tar.gz source
+
+
+def index_path(key, built):
+    value = param(key)
+    if not value:
+        return built
+    value = stage(value)
+    if value.endswith(".tar.gz"):
+        name = os.path.basename(value)[: -len(".tar.gz")]
+        UNTAR_SRC[name] = value
+        return f"{INDEX_DIR}/{name}"
+    return value
+
+
+INDEX = {
+    "bwa": lambda: index_path("bwa_index", f"{INDEX_DIR}/bwa"),
+    "bowtie2": lambda: index_path("bowtie2_index", f"{INDEX_DIR}/bowtie2"),
+    # CHROMAP_INDEX publishes to genome/index/chromap regardless of save_reference
+    "chromap": lambda: index_path("chromap_index", f"{O}/genome/index/chromap/{basename_noext(FASTA)}.index"),
+    "star": lambda: index_path("star_index", f"{INDEX_DIR}/star"),
+}[ALIGNER]()
+
+# -----------------------------------------------------------------------------
+# Samplesheet (SAMPLESHEET_CHECK + INPUT_CHECK)
+# -----------------------------------------------------------------------------
+# bin/check_samplesheet.py is run here to derive the library ids
+# (<sample>_REP<n>_T<m>) the DAG needs; the samplesheet_check rule runs it again
+# in its container to publish samplesheet.valid.csv.
+INPUT = stage(config["input"]) if is_url(config["input"]) else config["input"]
+with tempfile.TemporaryDirectory() as _tmp:
+    _raw = os.path.join(_tmp, "samplesheet.csv")
+    with open(_raw, "w") as fh:
+        fh.write(read_text(config["input"]))
+    _valid = os.path.join(_tmp, "samplesheet.valid.csv")
+    try:
+        check_samplesheet.check_samplesheet(_raw, _valid)
+    except SystemExit as e:
+        raise ValueError(f"Samplesheet check failed for {config['input']} (see message above).") from e
+    _libs = read_validated_samplesheet(_valid, param("seq_center") or "")
+
+LIBS = OrderedDict()     # library id (..._T<m>) -> meta
+SAMPLES = OrderedDict()  # merged library id (..._REP<n>) -> meta
+for lib in _libs:
+    fq = [stage(lib.pop("fastq_1"))]
+    fq2 = lib.pop("fastq_2")
+    if not lib["single_end"]:
+        fq.append(stage(fq2))
+    LIBS[lib["id"]] = dict(lib, reads=fq)
+    sid = strip_run(lib["id"])
+    meta = SAMPLES.setdefault(sid, {"single_end": lib["single_end"], "antibody": lib["antibody"],
+                                    "control": lib["control"], "libs": []})
+    meta["libs"].append(lib["id"])
+
+PE_LIBS = [l for l in LIBS if not LIBS[l]["single_end"]]
+SE_LIBS = [l for l in LIBS if LIBS[l]["single_end"]]
+PE_SAMPLES = [s for s in SAMPLES if not SAMPLES[s]["single_end"]]
+SE_SAMPLES = [s for s in SAMPLES if SAMPLES[s]["single_end"]]
+ANTIBODIES = sorted({m["antibody"] for m in SAMPLES.values() if m["antibody"]})
+
+wildcard_constraints:
+    lib=alternation(LIBS),
+    pe_lib=alternation(PE_LIBS),
+    se_lib=alternation(SE_LIBS),
+    sample=alternation(SAMPLES),
+    pe_sample=alternation(PE_SAMPLES),
+    se_sample=alternation(SE_SAMPLES),
+    antibody=alternation(ANTIBODIES),
+
+
+def mates(lib):
+    return [""] if LIBS[lib]["single_end"] else ["_1", "_2"]
+
+
+# -----------------------------------------------------------------------------
+# Per-library / per-sample status written by checkpoints (Groovy logic in nf-core)
+# -----------------------------------------------------------------------------
+def _summary(cp):
+    with open(cp.get().output[0]) as fh:
+        return json.load(fh)
+
+
+def lib_pass(lib):
+    """FASTQ_FASTQC_UMITOOLS_TRIMGALORE: reads after trimming >= min_trimmed_reads."""
+    return SKIP_TRIM or _summary(checkpoints.trim_summary)[lib]["pass"]
+
+
+def sample_libs(s):
+    return [l for l in SAMPLES[s]["libs"] if lib_pass(l)]
+
+
+def libs_ok():
+    return [l for l in LIBS if lib_pass(l)]
+
+
+def samples_ok():
+    """Merged libraries with at least one library left after trimming."""
+    return [s for s in SAMPLES if sample_libs(s)]
+
+
+def ip_samples():
+    """ch_ip_control_bam: IP samples whose control also made it through."""
+    ok = set(samples_ok())
+    return [s for s in SAMPLES if s in ok and SAMPLES[s]["control"] and SAMPLES[s]["control"] in ok]
+
+
+def peak_samples():
+    """BAM_PEAKS_CALL_QC_ANNOTATE_MACS3_HOMER: peaks.size() > 0."""
+    sizes = _summary(checkpoints.peak_summary)
+    return [s for s in ip_samples() if sizes[s] > 0]
+
+
+def antibody_groups():
+    """BED_CONSENSUS_QUANTIFY_QC_BEDTOOLS_FEATURECOUNTS_DESEQ2 meta per antibody."""
+    groups = OrderedDict()
+    for s in peak_samples():
+        groups.setdefault(SAMPLES[s]["antibody"], []).append(s)
+    out = OrderedDict()
+    for ab in sorted(groups):
+        counts = Counter(strip_rep(s) for s in groups[ab])
+        out[ab] = {"peaks": groups[ab], "multiple_groups": len(counts) > 1,
+                   "replicates_exist": max(counts.values()) > 1}
+    return out
+
+
+def consensus_antibodies():
+    if flag("skip_consensus_peaks"):
+        return []
+    return [ab for ab, m in antibody_groups().items() if m["multiple_groups"] or m["replicates_exist"]]
+
+
+def deseq2_antibodies():
+    if flag("skip_deseq2_qc"):
+        return []
+    groups = antibody_groups()
+    return [ab for ab in consensus_antibodies() if groups[ab]["multiple_groups"] and groups[ab]["replicates_exist"]]
+
+
+# -----------------------------------------------------------------------------
+# File names
+# -----------------------------------------------------------------------------
+def raw_reads(lib):
+    return LIBS[lib]["reads"]
+
+
+def trimmed_reads(lib):
+    if SKIP_TRIM:
+        return raw_reads(lib)
+    if LIBS[lib]["single_end"]:
+        return [f"{TRIM_DIR}/{lib}_trimmed.fq.gz"]
+    return [f"{TRIM_DIR}/{lib}_1_val_1.fq.gz", f"{TRIM_DIR}/{lib}_2_val_2.fq.gz"]
+
+
+def trim_logs(lib):
+    if LIBS[lib]["single_end"]:
+        return [f"{O}/trimgalore/logs/{lib}.fastq.gz_trimming_report.txt"]
+    return [f"{O}/trimgalore/logs/{lib}_{r}.fastq.gz_trimming_report.txt" for r in (1, 2)]
+
+
+def trim_fastqc(lib, ext):
+    sub = "fastqc" if ext == "html" else "fastqc/zips"
+    if LIBS[lib]["single_end"]:
+        return [f"{O}/trimgalore/{sub}/{lib}_trimmed_fastqc.{ext}"]
+    return [f"{O}/trimgalore/{sub}/{lib}_{r}_val_{r}_fastqc.{ext}" for r in (1, 2)]
+
+
+def raw_fastqc(lib, ext):
+    sub = "fastqc" if ext == "html" else "fastqc/zips"
+    return [f"{O}/{sub}/{lib}{m}_fastqc.{ext}" for m in mates(lib)]
+
+
+def lib_bam(lib):
+    return f"{LIB_DIR}/{lib}.Lb.sorted.bam"
+
+
+def mkd_bam(s):
+    return f"{MRG_DIR}/{s}.mLb.mkD.sorted.bam"
+
+
+def clean_bam(s):
+    return f"{ML}/{s}.mLb.clN.sorted.bam"
+
+
+def stats_files(bam):
+    d, name = os.path.split(bam)
+    return [f"{d}/samtools_stats/{name}.{x}" for x in ("stats", "flagstat", "idxstats")]
+
+
+def bigwig(s):
+    return f"{ML}/bigwig/{s}.mLb.clN.bigWig"
+
+
+def peak_file(s):
+    return f"{MACS}/{s}_peaks.{PEAK_EXT}"
+
+
+def consensus_prefix(ab):
+    return f"{MACS}/consensus/{ab}/{ab}.consensus_peaks"
+
+
+CMM_METRICS = ["alignment_summary_metrics", "base_distribution_by_cycle_metrics",
+               "quality_by_cycle_metrics", "quality_distribution_metrics"]
+
+
+def cmm_metrics(s):
+    out = [f"{ML}/picard_metrics/{s}.mLb.clN.sorted.CollectMultipleMetrics.{m}" for m in CMM_METRICS]
+    if not SAMPLES[s]["single_end"]:
+        out.append(f"{ML}/picard_metrics/{s}.mLb.clN.sorted.CollectMultipleMetrics.insert_size_metrics")
+    return out
+
+
+# -----------------------------------------------------------------------------
+# Targets
+# -----------------------------------------------------------------------------
+def genome_outputs():
+    out = [f"{O}/pipeline_info/samplesheet.valid.csv", FAI, SIZES]
+    if not flag("skip_igv"):
+        out.append(f"{O}/genome/{FASTA_NAME}")
+    if SAVE_REF:
+        out += [GTF, GENE_BED, FILTERED_BED, INDEX]
+        out += [f"{GENOME_DIR}/{n}" for n in GUNZIP_SRC]
+    if ALIGNER == "chromap" and not param("chromap_index"):
+        out.append(INDEX)
+    return out
+
+
+def library_outputs(lib):
+    out = []
+    if not SKIP_FASTQC:
+        out += raw_fastqc(lib, "html") + raw_fastqc(lib, "zip")
+    if not SKIP_TRIM:
+        out += trim_logs(lib) + trim_fastqc(lib, "html") + trim_fastqc(lib, "zip")
+    return out
+
+
+def aligned_library_outputs(lib):
+    out = []
+    if flag("save_trimmed") and not SKIP_TRIM:
+        out += trimmed_reads(lib)
+    if ALIGNER == "star":
+        out += [f"{AL}/library/log/{lib}.{x}" for x in ("Log.final.out", "Log.out", "Log.progress.out", "SJ.out.tab")]
+    if SAVE_ALIGN:
+        out += [lib_bam(lib), f"{lib_bam(lib)}.bai"] + stats_files(lib_bam(lib))
+    return out
+
+
+def sample_outputs(s):
+    pe = not SAMPLES[s]["single_end"]
+    out = [f"{ML}/picard_metrics/{s}.mLb.mkD.sorted.MarkDuplicates.metrics.txt"]
+    out += [clean_bam(s), f"{clean_bam(s)}.bai"] + stats_files(clean_bam(s))
+    if SAVE_ALIGN:
+        out += [f"{MRG_DIR}/{s}.mLb.sorted.bam", mkd_bam(s), f"{mkd_bam(s)}.bai"] + stats_files(mkd_bam(s))
+        if pe:
+            out += [f"{MRG_DIR}/{s}.mLb.flT.sorted.bam", f"{MRG_DIR}/{s}.mLb.flT.name_sorted.bam",
+                    f"{MRG_DIR}/{s}.mLb.clN.bam"]
+    if not flag("skip_preseq"):
+        out += [f"{ML}/preseq/{s}.mLb.mkD.lc_extrap.txt", f"{ML}/preseq/{s}.mLb.mkD.command.log"]
+    if not flag("skip_picard_metrics"):
+        out += cmm_metrics(s)
+    if not flag("skip_spp"):
+        out += [f"{ML}/phantompeakqualtools/{s}.spp.{x}" for x in ("out", "pdf")]
+        out += [f"{ML}/phantompeakqualtools/{s}.spp_{x}_mqc.tsv" for x in ("nsc", "rsc", "correlation")]
+    out += [bigwig(s), f"{ML}/bigwig/scale/{s}.mLB.clN.scale_factor.txt"]
+    if not flag("skip_plot_profile"):
+        p = f"{ML}/deepTools/plotProfile/{s}.mLb.clN"
+        out += [f"{p}.computeMatrix.mat.gz", f"{p}.computeMatrix.vals.mat.tab", f"{p}.plotProfile.pdf",
+                f"{p}.plotProfile.tab", f"{p}.plotHeatmap.pdf", f"{p}.plotHeatmap.mat.tab"]
+    return out
+
+
+def ip_outputs(s):
+    out = []
+    if not flag("skip_plot_fingerprint"):
+        p = f"{ML}/deepTools/plotFingerprint/{s}.mLb.clN.plotFingerprint"
+        out += [f"{p}.pdf", f"{p}.raw.txt", f"{p}.qcmetrics.txt"]
+    out += list(macs3_outputs(s).values())
+    return out
+
+
+def peak_outputs(s):
+    out = [f"{MACS}/qc/{s}.peak_count_mqc.tsv", f"{MACS}/qc/{s}.FRiP_mqc.tsv"]
+    if not SKIP_ANNOT:
+        out.append(f"{MACS}/{s}_peaks.annotatePeaks.txt")
+    return out
+
+
+def consensus_outputs(ab):
+    p = consensus_prefix(ab)
+    out = [f"{p}.{x}" for x in ("bed", "saf", "boolean.txt", "boolean.intersect.txt",
+                                 "boolean.intersect.plot.pdf", "antibody.txt",
+                                 "featureCounts.txt", "featureCounts.txt.summary")]
+    if not SKIP_ANNOT:
+        out += [f"{p}.annotatePeaks.txt", f"{p}.boolean.annotatePeaks.txt"]
+    if ab in deseq2_antibodies():
+        out += [f"{MACS}/consensus/{ab}/deseq2/{x}" for x in deseq2_names(ab)]
+    return out
+
+
+def all_outputs(wc):
+    out = genome_outputs()
+    for lib in LIBS:
+        out += library_outputs(lib)
+    for lib in libs_ok():
+        out += aligned_library_outputs(lib)
+    for s in samples_ok():
+        out += sample_outputs(s)
+    for s in ip_samples():
+        out += ip_outputs(s)
+    peaks = peak_samples()
+    for s in peaks:
+        out += peak_outputs(s)
+    if peaks and not SKIP_ANNOT and not flag("skip_peak_qc"):
+        out += [f"{MACS}/qc/macs3_peak.{x}" for x in ("summary.txt", "plots.pdf")]
+        out += [f"{MACS}/qc/macs3_annotatePeaks.{x}" for x in ("summary.txt", "plots.pdf", "summary_mqc.tsv")]
+    for ab in consensus_antibodies():
+        out += consensus_outputs(ab)
+    if not flag("skip_igv"):
+        out += [f"{O}/igv/{PEAK_TYPE}/igv_session.xml", f"{O}/igv/{PEAK_TYPE}/igv_files.txt"]
+    if not flag("skip_multiqc"):
+        out.append(f"{O}/multiqc/{PEAK_TYPE}/multiqc_report.html")
+    return out
+
+
+rule all:
+    input:
+        all_outputs,
+
+
+localrules:
+    all,
+    fetch_remote,
+    trim_status,
+    trim_summary,
+    peak_summary,
+
+
+# =============================================================================
+# Input staging
+# =============================================================================
+
+# Not an nf-core process: Nextflow stages remote inputs itself.
+rule fetch_remote:
+    output:
+        f"{W}/inputs/{{fname}}",
+    wildcard_constraints:
+        fname=alternation(REMOTE),
+    params:
+        url=lambda wc: REMOTE[wc.fname],
+    retries: 2
+    run:
+        import shutil
+
+        with urllib.request.urlopen(params.url) as src, open(output[0], "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
+# SAMPLESHEET_CHECK (bin/check_samplesheet.py)
+rule samplesheet_check:
+    input:
+        INPUT,
+    output:
+        f"{O}/pipeline_info/samplesheet.valid.csv",
+    container:
+        container_path("python")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shell:
+        "python3 {SCRIPTS}/check_samplesheet.py {input} {output}"
+
+
+# =============================================================================
+# PREPARE_GENOME
+# =============================================================================
+
+# GUNZIP_FASTA / GUNZIP_GTF / GUNZIP_GFF / GUNZIP_GENE_BED / GUNZIP_BLACKLIST
+rule gunzip:
+    input:
+        lambda wc: GUNZIP_SRC[wc.fname],
+    output:
+        f"{GENOME_DIR}/{{fname}}",
+    wildcard_constraints:
+        fname=alternation(GUNZIP_SRC),
+    container:
+        container_path("ubuntu22")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shell:
+        "gzip -cd {input} > {output}"
+
+
+# GFFREAD (GFF3 -> GTF when no GTF is given)
+rule gffread:
+    input:
+        GFF or [],
+    output:
+        f"{GENOME_DIR}/null.gtf",
+    params:
+        args=args("gffread"),
+    container:
+        container_path("gffread")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input}) {GFF_NAME}
+        gffread {GFF_NAME} {params.args} -o null.gtf
+        mv null.gtf {output}
+        """
+
+
+GFF_NAME = os.path.basename(GFF) if GFF else ""
+
+
+# GTF2BED (bin/gtf2bed)
+rule gtf2bed:
+    input:
+        GTF,
+    output:
+        f"{GENOME_DIR}/{basename_noext(GTF)}.bed",
+    container:
+        container_path("perl")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shell:
+        "perl {SCRIPTS}/gtf2bed {input} > {output}"
+
+
+# CUSTOM_GETCHROMSIZES
+rule custom_getchromsizes:
+    input:
+        FASTA,
+    output:
+        fai=FAI,
+        sizes=SIZES,
+    container:
+        container_path("samtools")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input}) {FASTA_NAME}
+        samtools faidx {FASTA_NAME}
+        cut -f 1,2 {FASTA_NAME}.fai > {FASTA_NAME}.sizes
+        mv {FASTA_NAME}.fai {output.fai}
+        mv {FASTA_NAME}.sizes {output.sizes}
+        """
+
+
+# GENOME_BLACKLIST_REGIONS
+rule genome_blacklist_regions:
+    input:
+        sizes=SIZES,
+        blacklist=BLACKLIST or [],
+    output:
+        FILTERED_BED,
+    container:
+        container_path("bedtools")
+    threads: res("process_default")["threads"]
+    resources:
+        mem_mb=res("process_default")["mem_mb"],
+    shell:
+        """
+        if [ -n "{input.blacklist}" ]; then
+            sortBed -i {input.blacklist} -g {input.sizes} | complementBed -i stdin -g {input.sizes} > {output}
+        else
+            awk '{{print $1, '0' , $2}}' OFS='\\t' {input.sizes} > {output}
+        fi
+        """
+
+
+# UNTAR_BWA_INDEX / UNTAR_BOWTIE2_INDEX / UNTAR_STAR_INDEX
+rule untar:
+    input:
+        lambda wc: UNTAR_SRC[wc.name],
+    output:
+        directory(f"{INDEX_DIR}/{{name}}"),
+    wildcard_constraints:
+        name=alternation(UNTAR_SRC),
+    container:
+        container_path("ubuntu22")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shell:
+        """
+        mkdir -p {output}
+        if [[ $(tar -taf {input} | grep -o -P "^.*?\\/" | uniq | wc -l) -eq 1 ]]; then
+            tar -C {output} --strip-components 1 -xavf {input} --no-same-owner
+        else
+            tar -C {output} -xavf {input} --no-same-owner
+        fi
+        """
+
+
+# BWA_INDEX
+rule bwa_index:
+    input:
+        FASTA,
+    output:
+        directory(f"{INDEX_DIR}/bwa"),
+    params:
+        prefix=basename_noext(FASTA),
+    container:
+        container_path("bwa_index")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input}) {FASTA_NAME}
+        mkdir bwa
+        bwa index -p bwa/{params.prefix} {FASTA_NAME}
+        mkdir -p $(dirname {output}) && mv bwa {output}
+        """
+
+
+# BOWTIE2_BUILD
+rule bowtie2_build:
+    input:
+        FASTA,
+    output:
+        directory(f"{INDEX_DIR}/bowtie2"),
+    params:
+        prefix=basename_noext(FASTA),
+    container:
+        container_path("bowtie2_build")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input}) {FASTA_NAME}
+        mkdir bowtie2
+        bowtie2-build --threads {threads} {FASTA_NAME} bowtie2/{params.prefix}
+        mkdir -p $(dirname {output}) && mv bowtie2 {output}
+        """
+
+
+# CHROMAP_INDEX
+rule chromap_index:
+    input:
+        FASTA,
+    output:
+        f"{O}/genome/index/chromap/{basename_noext(FASTA)}.index",
+    container:
+        container_path("chromap_index")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input}) {FASTA_NAME}
+        chromap -i -t {threads} -r {FASTA_NAME} -o $(basename {output})
+        mv $(basename {output}) {output}
+        """
+
+
+# STAR_GENOMEGENERATE (local module; --genomeSAindexNbases from genome size)
+rule star_genomegenerate:
+    input:
+        fasta=FASTA,
+        gtf=GTF,
+    output:
+        directory(f"{INDEX_DIR}/star"),
+    params:
+        memory=lambda wc, resources: resources.mem_mb * 1024 * 1024 - 100000000,
+    container:
+        container_path("star_genomegenerate")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.fasta}) {FASTA_NAME}
+        ln -s $(realpath {input.gtf}) {GTF_NAME}
+        samtools faidx {FASTA_NAME}
+        NUM_BASES=`gawk '{{sum = sum + $2}}END{{if ((log(sum)/log(2))/2 - 1 > 14) {{printf "%.0f", 14}} else {{printf "%.0f", (log(sum)/log(2))/2 - 1}}}}' {FASTA_NAME}.fai`
+        mkdir star
+        STAR --runMode genomeGenerate --genomeDir star/ --genomeFastaFiles {FASTA_NAME} \
+            --sjdbGTFfile {GTF_NAME} --runThreadN {threads} --genomeSAindexNbases $NUM_BASES \
+            --limitGenomeGenerateRAM {params.memory}
+        mkdir -p $(dirname {output}) && mv star {output}
+        """
+
+
+# =============================================================================
+# FASTQ_FASTQC_UMITOOLS_TRIMGALORE (UMI extraction is never enabled by chipseq)
+# =============================================================================
+
+# FASTQC (raw reads). The module links reads as ${prefix}.${extension}
+# (<id>.gz) or ${prefix}_<n>.${extension} (<id>_1.gz, <id>_2.gz).
+rule fastqc_se:
+    input:
+        lambda wc: raw_reads(wc.se_lib),
+    output:
+        html=f"{O}/fastqc/{{se_lib}}_fastqc.html",
+        zip=f"{O}/fastqc/zips/{{se_lib}}_fastqc.zip",
+    params:
+        args=args("fastqc"),
+        memory=lambda wc, resources: min(10000, max(100, resources.mem_mb)),
+        p=lambda wc: wc.se_lib,
+    container:
+        container_path("fastqc")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input[0]}) {params.p}.gz
+        fastqc {params.args} --threads {threads} --memory {params.memory} {params.p}.gz
+        mv {params.p}_fastqc.html {output.html}
+        mv {params.p}_fastqc.zip {output.zip}
+        """
+
+
+rule fastqc_pe:
+    input:
+        lambda wc: raw_reads(wc.pe_lib),
+    output:
+        html1=f"{O}/fastqc/{{pe_lib}}_1_fastqc.html",
+        zip1=f"{O}/fastqc/zips/{{pe_lib}}_1_fastqc.zip",
+        html2=f"{O}/fastqc/{{pe_lib}}_2_fastqc.html",
+        zip2=f"{O}/fastqc/zips/{{pe_lib}}_2_fastqc.zip",
+    params:
+        args=args("fastqc"),
+        memory=lambda wc, resources: min(10000, max(100, resources.mem_mb)),
+        p=lambda wc: wc.pe_lib,
+    container:
+        container_path("fastqc")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input[0]}) {params.p}_1.gz
+        ln -s $(realpath {input[1]}) {params.p}_2.gz
+        fastqc {params.args} --threads {threads} --memory {params.memory} {params.p}_1.gz {params.p}_2.gz
+        mv {params.p}_1_fastqc.html {output.html1}
+        mv {params.p}_1_fastqc.zip {output.zip1}
+        mv {params.p}_2_fastqc.html {output.html2}
+        mv {params.p}_2_fastqc.zip {output.zip2}
+        """
+
+
+def trimgalore_args(single_end):
+    """conf/modules.config TRIMGALORE ext.args (+ the module's SE _r2 filter)."""
+    parts = [args("trimgalore")]
+    if gt0("trim_nextseq"):
+        parts.append(f"--nextseq {param('trim_nextseq')}")
+    for key in ("clip_r1", "clip_r2", "three_prime_clip_r1", "three_prime_clip_r2"):
+        if gt0(key):
+            parts.append(f"--{key} {param(key)}")
+    joined = join_args(parts)
+    if single_end:
+        joined = " ".join(a for a in re.split(r"\s(?=--)", joined) if "_r2 " not in a.lower())
+    return joined
+
+
+def trimgalore_cores(threads, single_end):
+    cores = threads - (3 if single_end else 4)
+    return min(8, max(1, cores))
+
+
+# TRIMGALORE (paired-end)
+rule trimgalore_pe:
+    input:
+        lambda wc: raw_reads(wc.pe_lib),
+    output:
+        r1=f"{TRIM_DIR}/{{pe_lib}}_1_val_1.fq.gz",
+        r2=f"{TRIM_DIR}/{{pe_lib}}_2_val_2.fq.gz",
+        log1=f"{O}/trimgalore/logs/{{pe_lib}}_1.fastq.gz_trimming_report.txt",
+        log2=f"{O}/trimgalore/logs/{{pe_lib}}_2.fastq.gz_trimming_report.txt",
+        html1=f"{O}/trimgalore/fastqc/{{pe_lib}}_1_val_1_fastqc.html",
+        html2=f"{O}/trimgalore/fastqc/{{pe_lib}}_2_val_2_fastqc.html",
+        zip1=f"{O}/trimgalore/fastqc/zips/{{pe_lib}}_1_val_1_fastqc.zip",
+        zip2=f"{O}/trimgalore/fastqc/zips/{{pe_lib}}_2_val_2_fastqc.zip",
+    params:
+        args=trimgalore_args(False),
+        cores=lambda wc, threads: trimgalore_cores(threads, False),
+        p=lambda wc: wc.pe_lib,
+    container:
+        container_path("trimgalore")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input[0]}) {params.p}_1.fastq.gz
+        ln -s $(realpath {input[1]}) {params.p}_2.fastq.gz
+        trim_galore {params.args} --cores {params.cores} --paired --gzip \
+            {params.p}_1.fastq.gz {params.p}_2.fastq.gz
+        mv {params.p}_1_val_1.fq.gz {output.r1}
+        mv {params.p}_2_val_2.fq.gz {output.r2}
+        mv {params.p}_1.fastq.gz_trimming_report.txt {output.log1}
+        mv {params.p}_2.fastq.gz_trimming_report.txt {output.log2}
+        mv {params.p}_1_val_1_fastqc.html {output.html1}
+        mv {params.p}_2_val_2_fastqc.html {output.html2}
+        mv {params.p}_1_val_1_fastqc.zip {output.zip1}
+        mv {params.p}_2_val_2_fastqc.zip {output.zip2}
+        """
+
+
+# TRIMGALORE (single-end)
+rule trimgalore_se:
+    input:
+        lambda wc: raw_reads(wc.se_lib),
+    output:
+        r1=f"{TRIM_DIR}/{{se_lib}}_trimmed.fq.gz",
+        log=f"{O}/trimgalore/logs/{{se_lib}}.fastq.gz_trimming_report.txt",
+        html=f"{O}/trimgalore/fastqc/{{se_lib}}_trimmed_fastqc.html",
+        zip=f"{O}/trimgalore/fastqc/zips/{{se_lib}}_trimmed_fastqc.zip",
+    params:
+        args=trimgalore_args(True),
+        cores=lambda wc, threads: trimgalore_cores(threads, True),
+        p=lambda wc: wc.se_lib,
+    container:
+        container_path("trimgalore")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input[0]}) {params.p}.fastq.gz
+        trim_galore {params.args} --cores {params.cores} --gzip {params.p}.fastq.gz
+        mv {params.p}_trimmed.fq.gz {output.r1}
+        mv {params.p}.fastq.gz_trimming_report.txt {output.log}
+        mv {params.p}_trimmed_fastqc.html {output.html}
+        mv {params.p}_trimmed_fastqc.zip {output.zip}
+        """
+
+
+# Groovy in FASTQ_FASTQC_UMITOOLS_TRIMGALORE: reads left after trimming
+# (getTrimGaloreReadsAfterFiltering on the last report) vs min_trimmed_reads.
+rule trim_status:
+    input:
+        lambda wc: trim_logs(wc.lib)[-1],
+    output:
+        f"{W}/status/{{lib}}.trim.json",
+    run:
+        n = trimgalore_reads_after_filtering(input[0])
+        with open(output[0], "w") as fh:
+            json.dump({"lib": wildcards.lib, "num_reads": n,
+                       "pass": n >= float(config["min_trimmed_reads"])}, fh)
+
+
+checkpoint trim_summary:
+    input:
+        [] if SKIP_TRIM else [f"{W}/status/{l}.trim.json" for l in LIBS],
+    output:
+        f"{W}/status/trim_summary.json",
+    run:
+        summary = {}
+        for f in input:
+            with open(f) as fh:
+                st = json.load(fh)
+            summary[st["lib"]] = st
+        with open(output[0], "w") as fh:
+            json.dump(summary, fh, indent=1)
+
+
+# =============================================================================
+# Alignment (FASTQ_ALIGN_BWA / FASTQ_ALIGN_BOWTIE2 / FASTQ_ALIGN_CHROMAP / ALIGN_STAR)
+# =============================================================================
+def read_links(lib):
+    """File names the trimmed reads are staged under."""
+    return [os.path.basename(f) for f in trimmed_reads(lib)]
+
+
+def link_reads_cmd(wc, input):
+    return "; ".join(f"ln -s $(realpath {f}) {os.path.basename(f)}" for f in input.reads)
+
+
+# save_unaligned: unmapped reads are written to {AL}/library/unmapped/ as
+# untracked extra files (their presence depends on the aligner's output).
+def unmapped_reads(lib):
+    d = os.path.abspath(f"{AL}/library/unmapped")
+    if ALIGNER == "bowtie2":
+        if LIBS[lib]["single_end"]:
+            return [f"{d}/{lib}.Lb.unmapped.fastq.gz"]
+        return [f"{d}/{lib}.Lb.unmapped_1.fastq.gz", f"{d}/{lib}.Lb.unmapped_2.fastq.gz"]
+    if LIBS[lib]["single_end"]:
+        return [f"{d}/{lib}.unmapped_1.fastq.gz"]
+    return [f"{d}/{lib}.unmapped_1.fastq.gz", f"{d}/{lib}.unmapped_2.fastq.gz"]
+
+
+def bwa_mem_args(lib):
+    """conf/modules.config BWA_MEM ext.args"""
+    parts = [args("bwa_mem")]
+    if param("bwa_min_score"):
+        parts.append(f" -T {param('bwa_min_score')}")
+    parts.append(f"-R {LIBS[lib]['read_group']}")
+    return join_args(parts)
+
+
+# BWA_MEM (bwa mem | samtools view; sort_bam = false)
+rule bwa_mem:
+    input:
+        reads=lambda wc: trimmed_reads(wc.lib),
+        index=INDEX,
+    output:
+        f"{W}/bwa/library/{{lib}}.Lb.bam",
+    params:
+        args=lambda wc: bwa_mem_args(wc.lib),
+        args2=args("bwa_mem_samtools"),
+        index=os.path.basename(INDEX),  # staged under its own name, as in Nextflow
+        link=link_reads_cmd,
+        reads=lambda wc: " ".join(read_links(wc.lib)),
+    container:
+        container_path("bwa_mem")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        {params.link}
+        ln -s $(realpath {input.index}) {params.index}
+        INDEX=`find -L ./{params.index} -name "*.amb" | sed 's/\\.amb$//'`
+        bwa mem {params.args} -t {threads} $INDEX {params.reads} \
+            | samtools view {params.args2} --threads {threads} -o {wildcards.lib}.Lb.bam -
+        mv {wildcards.lib}.Lb.bam {output}
+        """
+
+
+def bowtie2_args(lib):
+    """conf/modules.config BOWTIE2_ALIGN ext.args"""
+    parts = [f"--rg-id {lib} --rg SM:{strip_run(lib)} --rg PL:ILLUMINA --rg LB:{lib} --rg PU:1"]
+    if param("seq_center"):
+        parts.append(f"--rg CN:{param('seq_center')}")
+    return join_args(parts)
+
+
+# BOWTIE2_ALIGN (bowtie2 | samtools view; sort_bam = false)
+rule bowtie2_align:
+    input:
+        reads=lambda wc: trimmed_reads(wc.lib),
+        index=INDEX,
+    output:
+        bam=f"{W}/bowtie2/library/{{lib}}.Lb.bam",
+        log=f"{W}/bowtie2/library/{{lib}}.Lb.bowtie2.log",
+    params:
+        args=lambda wc: bowtie2_args(wc.lib),
+        index=os.path.basename(INDEX),
+        link=link_reads_cmd,
+        reads=lambda wc: (f"-U {read_links(wc.lib)[0]}" if LIBS[wc.lib]["single_end"]
+                          else f"-1 {read_links(wc.lib)[0]} -2 {read_links(wc.lib)[1]}"),
+        unaligned=lambda wc: "" if not SAVE_UNALIGNED else (
+            f"--un-gz {wc.lib}.Lb.unmapped.fastq.gz" if LIBS[wc.lib]["single_end"]
+            else f"--un-conc-gz {wc.lib}.Lb.unmapped.fastq.gz"),
+        unmapped=lambda wc: " ".join(unmapped_reads(wc.lib)) if SAVE_UNALIGNED else "",
+    container:
+        container_path("bowtie2_align")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        {params.link}
+        ln -s $(realpath {input.index}) {params.index}
+        INDEX=`find -L ./{params.index} -name "*.rev.1.bt2" | sed "s/\\.rev.1.bt2$//"`
+        [ -z "$INDEX" ] && INDEX=`find -L ./{params.index} -name "*.rev.1.bt2l" | sed "s/\\.rev.1.bt2l$//"`
+        [ -z "$INDEX" ] && echo "Bowtie2 index files not found" 1>&2 && exit 1
+        bowtie2 -x $INDEX {params.reads} --threads {threads} {params.unaligned} {params.args} \
+            2> {wildcards.lib}.Lb.bowtie2.log \
+            | samtools view --threads {threads} -o {wildcards.lib}.Lb.bam -
+        cat {wildcards.lib}.Lb.bowtie2.log >&2
+        if [ -f {wildcards.lib}.Lb.unmapped.fastq.1.gz ]; then
+            mv {wildcards.lib}.Lb.unmapped.fastq.1.gz {wildcards.lib}.Lb.unmapped_1.fastq.gz
+        fi
+        if [ -f {wildcards.lib}.Lb.unmapped.fastq.2.gz ]; then
+            mv {wildcards.lib}.Lb.unmapped.fastq.2.gz {wildcards.lib}.Lb.unmapped_2.fastq.gz
+        fi
+        mv {wildcards.lib}.Lb.bam {output.bam}
+        mv {wildcards.lib}.Lb.bowtie2.log {output.log}
+        for f in {params.unmapped}; do mkdir -p $(dirname $f); mv $(basename $f) $f; done
+        """
+
+
+# CHROMAP_CHROMAP (--SAM, then samtools addreplacerg + view -bh)
+rule chromap:
+    input:
+        reads=lambda wc: trimmed_reads(wc.lib),
+        index=INDEX,
+        fasta=FASTA,
+    output:
+        f"{W}/chromap/library/{{lib}}.Lb.bam",
+    params:
+        args=args("chromap"),
+        args3=lambda wc: f"-r {LIBS[wc.lib]['read_group']}",
+        link=link_reads_cmd,
+        reads=lambda wc: (f"-1 {','.join(read_links(wc.lib))}" if LIBS[wc.lib]["single_end"]
+                          else f"-1 {read_links(wc.lib)[0]} -2 {read_links(wc.lib)[1]}"),
+        index=os.path.basename(INDEX),
+    container:
+        container_path("chromap")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        {params.link}
+        ln -s $(realpath {input.index}) {params.index}
+        ln -s $(realpath {input.fasta}) {FASTA_NAME}
+        p={wildcards.lib}.Lb
+        chromap {params.args} -t {threads} -x {params.index} -r {FASTA_NAME} {params.reads} -o $p.sam
+        samtools addreplacerg {params.args3} -o $p.rg.sam $p.sam
+        samtools view -@ {threads} -bh -o $p.bam $p.rg.sam
+        rm $p.rg.sam $p.sam
+        mv $p.bam {output}
+        """
+
+
+# STAR_ALIGN (local module, STAR 2.6.1d)
+rule star_align:
+    input:
+        reads=lambda wc: trimmed_reads(wc.lib),
+        index=INDEX,
+    output:
+        bam=f"{W}/star/library/{{lib}}.Aligned.out.bam",
+        log_final=f"{AL}/library/log/{{lib}}.Log.final.out",
+        log_out=f"{AL}/library/log/{{lib}}.Log.out",
+        log_progress=f"{AL}/library/log/{{lib}}.Log.progress.out",
+        tab=f"{AL}/library/log/{{lib}}.SJ.out.tab",
+    params:
+        args=args("star_align") + (" --outReadsUnmapped Fastx" if SAVE_UNALIGNED else ""),
+        rg=lambda wc: (f"--outSAMattrRGline ID:{wc.lib} 'CN:{param('seq_center')}' 'SM:{wc.lib}'"
+                       if param("seq_center") else f"--outSAMattrRGline ID:{wc.lib} 'SM:{wc.lib}'"),
+        link=link_reads_cmd,
+        reads=lambda wc: " ".join(read_links(wc.lib)),
+        unmapped_dir=os.path.abspath(f"{AL}/library/unmapped"),
+    container:
+        container_path("star")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        {params.link}
+        ln -s $(realpath {input.index}) star
+        p={wildcards.lib}
+        STAR --genomeDir star --readFilesIn {params.reads} --runThreadN {threads} \
+            --outFileNamePrefix $p. {params.rg} {params.args}
+        for m in 1 2; do
+            if [ -f $p.Unmapped.out.mate$m ]; then
+                mv $p.Unmapped.out.mate$m $p.unmapped_$m.fastq
+                gzip $p.unmapped_$m.fastq
+                mkdir -p {params.unmapped_dir} && mv $p.unmapped_$m.fastq.gz {params.unmapped_dir}/
+            fi
+        done
+        mv $p.Aligned.out.bam {output.bam}
+        mv $p.Log.final.out {output.log_final}
+        mv $p.Log.out {output.log_out}
+        mv $p.Log.progress.out {output.log_progress}
+        mv $p.SJ.out.tab {output.tab}
+        """
+
+
+def aligner_bam(wc):
+    if ALIGNER == "star":
+        return f"{W}/star/library/{wc.lib}.Aligned.out.bam"
+    return f"{W}/{ALIGNER}/library/{wc.lib}.Lb.bam"
+
+
+# =============================================================================
+# SAMTOOLS sort / index / stats (BAM_SORT_STATS_SAMTOOLS, BAM_STATS_SAMTOOLS)
+# =============================================================================
+
+# BAM_SORT_STATS_SAMTOOLS:SAMTOOLS_SORT (library, prefix <id>.Lb.sorted)
+rule samtools_sort_library:
+    input:
+        bam=aligner_bam,
+        fasta=FASTA,
+    output:
+        f"{LIB_DIR}/{{lib}}.Lb.sorted.bam",
+    container:
+        container_path("samtools")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.bam}) $(basename {input.bam})
+        ln -s $(realpath {input.fasta}) {FASTA_NAME}
+        p={wildcards.lib}.Lb.sorted
+        samtools cat --threads {threads} $(basename {input.bam}) \
+            | samtools sort -T $p --threads {threads} --reference {FASTA_NAME} -o $p.bam -
+        mv $p.bam {output}
+        """
+
+
+BAM_DIRS = sorted({LIB_DIR, MRG_DIR, ML})
+STAT_BAM = r"[^/]+\.(?:Lb\.sorted|mLb\.mkD\.sorted|mLb\.clN\.sorted)\.bam"
+
+
+# SAMTOOLS_INDEX (library, markduplicates and filtered BAMs)
+rule samtools_index:
+    input:
+        "{bdir}/{bam}",
+    output:
+        "{bdir}/{bam}.bai",
+    wildcard_constraints:
+        bdir=alternation(BAM_DIRS),
+        bam=STAT_BAM,
+    container:
+        container_path("samtools")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shell:
+        "samtools index -@ $(({threads} - 1)) {input}"
+
+
+# BAM_STATS_SAMTOOLS:SAMTOOLS_STATS (with --reference, as ch_fasta is given)
+rule samtools_stats:
+    input:
+        bam="{bdir}/{bam}",
+        bai="{bdir}/{bam}.bai",
+        fasta=FASTA,
+    output:
+        "{bdir}/samtools_stats/{bam}.stats",
+    wildcard_constraints:
+        bdir=alternation(BAM_DIRS),
+        bam=STAT_BAM,
+    container:
+        container_path("samtools")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.bam}) {wildcards.bam}
+        ln -s $(realpath {input.bai}) {wildcards.bam}.bai
+        ln -s $(realpath {input.fasta}) {FASTA_NAME}
+        samtools stats --threads {threads} --reference {FASTA_NAME} {wildcards.bam} > {wildcards.bam}.stats
+        mv {wildcards.bam}.stats {output}
+        """
+
+
+# BAM_STATS_SAMTOOLS:SAMTOOLS_FLAGSTAT
+rule samtools_flagstat:
+    input:
+        bam="{bdir}/{bam}",
+        bai="{bdir}/{bam}.bai",
+    output:
+        "{bdir}/samtools_stats/{bam}.flagstat",
+    wildcard_constraints:
+        bdir=alternation(BAM_DIRS),
+        bam=STAT_BAM,
+    container:
+        container_path("samtools")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shell:
+        "samtools flagstat --threads {threads} {input.bam} > {output}"
+
+
+# BAM_STATS_SAMTOOLS:SAMTOOLS_IDXSTATS
+rule samtools_idxstats:
+    input:
+        bam="{bdir}/{bam}",
+        bai="{bdir}/{bam}.bai",
+    output:
+        "{bdir}/samtools_stats/{bam}.idxstats",
+    wildcard_constraints:
+        bdir=alternation(BAM_DIRS),
+        bam=STAT_BAM,
+    container:
+        container_path("samtools")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shell:
+        "samtools idxstats --threads $(({threads} - 1)) {input.bam} > {output}"
+
+
+# =============================================================================
+# Merged libraries: PICARD_MERGESAMFILES, BAM_MARKDUPLICATES_PICARD
+# =============================================================================
+
+# PICARD_MERGESAMFILES (a single library is linked, as in the module)
+rule picard_mergesamfiles:
+    input:
+        lambda wc: sorted((lib_bam(l) for l in sample_libs(wc.sample)), key=os.path.basename),
+    output:
+        f"{MRG_DIR}/{{sample}}.mLb.sorted.bam",
+    params:
+        args=args("picard_mergesamfiles"),
+        mem=lambda wc, resources: picard_mem(resources),
+        # publish_dir_mode copy: a real file when the BAM is published
+        single="cp" if SAVE_ALIGN else "ln -s",
+    container:
+        container_path("picard")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        set -- {input}
+        if [ $# -gt 1 ]; then
+            inputs=
+            for f in {input}; do ln -s $(realpath $f) $(basename $f); inputs="$inputs --INPUT $(basename $f)"; done
+            picard -Xmx{params.mem}M MergeSamFiles {params.args} $inputs --OUTPUT {wildcards.sample}.mLb.sorted.bam
+            mv {wildcards.sample}.mLb.sorted.bam {output}
+        else
+            {params.single} $(realpath {input}) {output}
+        fi
+        """
+
+
+# BAM_MARKDUPLICATES_PICARD:PICARD_MARKDUPLICATES
+rule picard_markduplicates:
+    input:
+        bam=f"{MRG_DIR}/{{sample}}.mLb.sorted.bam",
+        fasta=FASTA,
+        fai=FAI,
+    output:
+        bam=f"{MRG_DIR}/{{sample}}.mLb.mkD.sorted.bam",
+        metrics=f"{ML}/picard_metrics/{{sample}}.mLb.mkD.sorted.MarkDuplicates.metrics.txt",
+    params:
+        args=args("picard_markduplicates"),
+        mem=lambda wc, resources: picard_mem(resources),
+    container:
+        container_path("picard")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.bam}) {wildcards.sample}.mLb.sorted.bam
+        ln -s $(realpath {input.fasta}) {FASTA_NAME}
+        ln -s $(realpath {input.fai}) {FASTA_NAME}.fai
+        p={wildcards.sample}.mLb.mkD.sorted
+        picard -Xmx{params.mem}M MarkDuplicates {params.args} \
+            --INPUT {wildcards.sample}.mLb.sorted.bam --OUTPUT $p.bam \
+            --REFERENCE_SEQUENCE {FASTA_NAME} --METRICS_FILE $p.MarkDuplicates.metrics.txt
+        mv $p.bam {output.bam}
+        mv $p.MarkDuplicates.metrics.txt {output.metrics}
+        """
+
+
+# =============================================================================
+# BAM_FILTER_BAMTOOLS
+# =============================================================================
+def bamtools_args(s):
+    """conf/modules.config BAMTOOLS_FILTER ext.args"""
+    return join_args([
+        "-F 0x004" if SAMPLES[s]["single_end"] else "-F 0x004 -F 0x0008 -f 0x001",
+        "" if flag("keep_dups") else "-F 0x0400",
+        "" if flag("keep_multi_map") else "-q 1",
+    ])
+
+
+def bamtools_inputs(s):
+    se = SAMPLES[s]["single_end"]
+    return {
+        "bam": mkd_bam(s),
+        "bai": f"{mkd_bam(s)}.bai",
+        "bed": FILTERED_BED,
+        "config": asset_path(config["bamtools_filter_se_config" if se else "bamtools_filter_pe_config"]),
+    }
+
+
+BAMTOOLS_FILTER_CMD = """
+        ln -s $(realpath {input.bam}) $(basename {input.bam})
+        ln -s $(realpath {input.bai}) $(basename {input.bai})
+        ln -s $(realpath {input.bed}) $(basename {input.bed})
+        ln -s $(realpath {input.config}) $(basename {input.config})
+        samtools view {params.args} -L $(basename {input.bed}) -b $(basename {input.bam}) \
+            | bamtools filter -out {params.prefix}.bam -script $(basename {input.config})
+        mv {params.prefix}.bam {output}
+"""
+
+
+# BAMTOOLS_FILTER (paired-end: <id>.mLb.flT.sorted.bam, orphans removed next)
+rule bamtools_filter_pe:
+    input:
+        unpack(lambda wc: bamtools_inputs(wc.pe_sample)),
+    output:
+        f"{MRG_DIR}/{{pe_sample}}.mLb.flT.sorted.bam",
+    params:
+        args=lambda wc: bamtools_args(wc.pe_sample),
+        prefix=lambda wc: f"{wc.pe_sample}.mLb.flT.sorted",
+    container:
+        container_path("bamtools")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        BAMTOOLS_FILTER_CMD
+
+
+# BAMTOOLS_FILTER (single-end: final <id>.mLb.clN.sorted.bam)
+rule bamtools_filter_se:
+    input:
+        unpack(lambda wc: bamtools_inputs(wc.se_sample)),
+    output:
+        f"{ML}/{{se_sample}}.mLb.clN.sorted.bam",
+    params:
+        args=lambda wc: bamtools_args(wc.se_sample),
+        prefix=lambda wc: f"{wc.se_sample}.mLb.clN.sorted",
+    container:
+        container_path("bamtools")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        BAMTOOLS_FILTER_CMD
+
+
+# BAM_FILTER_BAMTOOLS:SAMTOOLS_SORT (-n, prefix <id>.mLb.flT.name_sorted)
+rule samtools_sort_name:
+    input:
+        bam=f"{MRG_DIR}/{{pe_sample}}.mLb.flT.sorted.bam",
+        fasta=FASTA,
+    output:
+        f"{MRG_DIR}/{{pe_sample}}.mLb.flT.name_sorted.bam",
+    params:
+        args=args("filter_name_sort"),
+    container:
+        container_path("samtools")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.bam}) $(basename {input.bam})
+        ln -s $(realpath {input.fasta}) {FASTA_NAME}
+        p={wildcards.pe_sample}.mLb.flT.name_sorted
+        samtools cat --threads {threads} $(basename {input.bam}) \
+            | samtools sort {params.args} -T $p --threads {threads} --reference {FASTA_NAME} -o $p.bam -
+        mv $p.bam {output}
+        """
+
+
+# BAM_REMOVE_ORPHANS (bin/bampe_rm_orphan.py)
+rule bam_remove_orphans:
+    input:
+        f"{MRG_DIR}/{{pe_sample}}.mLb.flT.name_sorted.bam",
+    output:
+        f"{MRG_DIR}/{{pe_sample}}.mLb.clN.bam",
+    params:
+        args=args("bam_remove_orphans"),
+    container:
+        container_path("pysam")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input}) $(basename {input})
+        p={wildcards.pe_sample}.mLb.clN
+        samtools sort -n -@ {threads} -o $p.name.sorted.bam -T $p.name.sorted $(basename {input})
+        python3 {SCRIPTS}/bampe_rm_orphan.py $p.name.sorted.bam $p.bam {params.args}
+        mv $p.bam {output}
+        """
+
+
+# BAM_FILTER_BAMTOOLS:BAM_SORT_STATS_SAMTOOLS:SAMTOOLS_SORT (prefix <id>.mLb.clN.sorted)
+rule samtools_sort_clean:
+    input:
+        bam=f"{MRG_DIR}/{{pe_sample}}.mLb.clN.bam",
+        fasta=FASTA,
+    output:
+        f"{ML}/{{pe_sample}}.mLb.clN.sorted.bam",
+    container:
+        container_path("samtools")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.bam}) $(basename {input.bam})
+        ln -s $(realpath {input.fasta}) {FASTA_NAME}
+        p={wildcards.pe_sample}.mLb.clN.sorted
+        samtools cat --threads {threads} $(basename {input.bam}) \
+            | samtools sort -T $p --threads {threads} --reference {FASTA_NAME} -o $p.bam -
+        mv $p.bam {output}
+        """
+
+
+# =============================================================================
+# Merged-library QC
+# =============================================================================
+
+# PRESEQ_LCEXTRAP (on the markduplicates BAM; stderr is the command log)
+rule preseq_lcextrap:
+    input:
+        mkd_bam("{sample}"),
+    output:
+        txt=f"{ML}/preseq/{{sample}}.mLb.mkD.lc_extrap.txt",
+        log=f"{ML}/preseq/{{sample}}.mLb.mkD.command.log",
+    params:
+        args=args("preseq"),
+        pe=lambda wc: "" if SAMPLES[wc.sample]["single_end"] else "-pe",
+    container:
+        container_path("preseq")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input}) $(basename {input})
+        p={wildcards.sample}.mLb.mkD
+        preseq lc_extrap {params.args} {params.pe} -output $p.lc_extrap.txt $(basename {input}) \
+            2> $p.command.log || {{ cat $p.command.log >&2; exit 1; }}
+        mv $p.lc_extrap.txt {output.txt}
+        mv $p.command.log {output.log}
+        """
+
+
+def cmm_inputs(s):
+    return {"bam": clean_bam(s), "bai": f"{clean_bam(s)}.bai", "fasta": FASTA, "fai": FAI}
+
+
+CMM = f"{ML}/picard_metrics/{{s}}.mLb.clN.sorted.CollectMultipleMetrics"
+# PDFs are untracked extras (which plots Picard draws depends on the data).
+CMM_CMD = """
+        ln -s $(realpath {input.bam}) $(basename {input.bam})
+        ln -s $(realpath {input.bai}) $(basename {input.bai})
+        ln -s $(realpath {input.fasta}) {FASTA_NAME}
+        ln -s $(realpath {input.fai}) {FASTA_NAME}.fai
+        p=$(basename {input.bam} .bam)
+        picard -Xmx{params.mem}M CollectMultipleMetrics {params.args} \\
+            --INPUT $(basename {input.bam}) --OUTPUT $p.CollectMultipleMetrics --REFERENCE_SEQUENCE {FASTA_NAME}
+        for f in {output}; do mv $(basename $f) $f; done
+        mkdir -p {params.pdf_dir}
+        for f in $p.CollectMultipleMetrics*.pdf; do [ -e "$f" ] && mv $f {params.pdf_dir}/; done
+"""
+
+
+# PICARD_COLLECTMULTIPLEMETRICS (paired-end: adds insert size metrics)
+rule picard_collectmultiplemetrics_pe:
+    input:
+        unpack(lambda wc: cmm_inputs(wc.pe_sample)),
+    output:
+        **{m: CMM.format(s="{pe_sample}") + f".{m}" for m in CMM_METRICS + ["insert_size_metrics"]},
+    params:
+        args=args("picard_collectmultiplemetrics"),
+        mem=lambda wc, resources: picard_mem(resources),
+        pdf_dir=os.path.abspath(f"{ML}/picard_metrics/pdf"),
+    container:
+        container_path("picard")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        CMM_CMD
+
+
+# PICARD_COLLECTMULTIPLEMETRICS (single-end)
+rule picard_collectmultiplemetrics_se:
+    input:
+        unpack(lambda wc: cmm_inputs(wc.se_sample)),
+    output:
+        **{m: CMM.format(s="{se_sample}") + f".{m}" for m in CMM_METRICS},
+    params:
+        args=args("picard_collectmultiplemetrics"),
+        mem=lambda wc, resources: picard_mem(resources),
+        pdf_dir=os.path.abspath(f"{ML}/picard_metrics/pdf"),
+    container:
+        container_path("picard")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        CMM_CMD
+
+
+# PHANTOMPEAKQUALTOOLS
+rule phantompeakqualtools:
+    input:
+        clean_bam("{sample}"),
+    output:
+        out=f"{ML}/phantompeakqualtools/{{sample}}.spp.out",
+        pdf=f"{ML}/phantompeakqualtools/{{sample}}.spp.pdf",
+        rdata=f"{W}/phantompeakqualtools/{{sample}}.spp.Rdata",
+    params:
+        args=args("phantompeakqualtools"),
+    container:
+        container_path("phantompeakqualtools")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input}) $(basename {input})
+        p={wildcards.sample}
+        RUN_SPP=`which run_spp.R`
+        Rscript {params.args} -e "library(caTools); source(\\"$RUN_SPP\\")" -c="$(basename {input})" \
+            -savp="$p.spp.pdf" -savd="$p.spp.Rdata" -out="$p.spp.out" -p={threads}
+        mv $p.spp.out {output.out}
+        mv $p.spp.pdf {output.pdf}
+        mv $p.spp.Rdata {output.rdata}
+        """
+
+
+# MULTIQC_CUSTOM_PHANTOMPEAKQUALTOOLS
+rule multiqc_custom_phantompeakqualtools:
+    input:
+        spp=f"{ML}/phantompeakqualtools/{{sample}}.spp.out",
+        rdata=f"{W}/phantompeakqualtools/{{sample}}.spp.Rdata",
+        nsc=f"{ASSETS}/multiqc/spp_nsc_header.txt",
+        rsc=f"{ASSETS}/multiqc/spp_rsc_header.txt",
+        corr=f"{ASSETS}/multiqc/spp_correlation_header.txt",
+    output:
+        nsc=f"{ML}/phantompeakqualtools/{{sample}}.spp_nsc_mqc.tsv",
+        rsc=f"{ML}/phantompeakqualtools/{{sample}}.spp_rsc_mqc.tsv",
+        corr=f"{ML}/phantompeakqualtools/{{sample}}.spp_correlation_mqc.tsv",
+    container:
+        container_path("rbase")
+    threads: res("process_default")["threads"]
+    resources:
+        mem_mb=res("process_default")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.rdata}) $(basename {input.rdata})
+        p={wildcards.sample}
+        cp {input.corr} $p.spp_correlation_mqc.tsv
+        Rscript --max-ppsize=500000 -e "load('$(basename {input.rdata})'); write.table(crosscorr\\$cross.correlation, file=\\"$p.spp_correlation_mqc.tsv\\", sep=",", quote=FALSE, row.names=FALSE, col.names=FALSE,append=TRUE)"
+        awk -v OFS='\\t' '{{print "{wildcards.sample}", $9}}'  {input.spp} | cat {input.nsc} - > $p.spp_nsc_mqc.tsv
+        awk -v OFS='\\t' '{{print "{wildcards.sample}", $10}}' {input.spp} | cat {input.rsc} - > $p.spp_rsc_mqc.tsv
+        mv $p.spp_correlation_mqc.tsv {output.corr}
+        mv $p.spp_nsc_mqc.tsv {output.nsc}
+        mv $p.spp_rsc_mqc.tsv {output.rsc}
+        """
+
+
+# =============================================================================
+# BAM_BEDGRAPH_BIGWIG_BEDTOOLS_UCSC
+# =============================================================================
+
+# BEDTOOLS_GENOMECOV (local module; CPM scale factor from the filtered flagstat)
+rule bedtools_genomecov:
+    input:
+        bam=clean_bam("{sample}"),
+        flagstat=stats_files(clean_bam("{sample}"))[1],
+    output:
+        bedgraph=f"{W}/bigwig/{{sample}}.mLB.clN.bedGraph",
+        scale=f"{ML}/bigwig/scale/{{sample}}.mLB.clN.scale_factor.txt",
+    params:
+        pe=lambda wc: "" if SAMPLES[wc.sample]["single_end"] else "-pc",
+        args=lambda wc: (f"-fs {config['fragment_size']}"
+                         if SAMPLES[wc.sample]["single_end"] and float(config["fragment_size"] or 0) > 0 else ""),
+    container:
+        container_path("bedtools")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.bam}) $(basename {input.bam})
+        p={wildcards.sample}.mLB.clN
+        SCALE_FACTOR=$(grep '[0-9] mapped (' {input.flagstat} | awk '{{print 1000000/$1}}')
+        echo $SCALE_FACTOR > $p.scale_factor.txt
+        bedtools genomecov -ibam $(basename {input.bam}) -bg -scale $SCALE_FACTOR {params.pe} {params.args} \
+            | sort -T '.' -k1,1 -k2,2n > $p.bedGraph
+        mv $p.bedGraph {output.bedgraph}
+        mv $p.scale_factor.txt {output.scale}
+        """
+
+
+# UCSC_BEDGRAPHTOBIGWIG
+rule ucsc_bedgraphtobigwig:
+    input:
+        bedgraph=f"{W}/bigwig/{{sample}}.mLB.clN.bedGraph",
+        sizes=SIZES,
+    output:
+        bigwig("{sample}"),
+    container:
+        container_path("bedgraphtobigwig")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shell:
+        "bedGraphToBigWig {input.bedgraph} {input.sizes} {output}"
+
+
+# =============================================================================
+# deepTools
+# =============================================================================
+PROFILE = f"{ML}/deepTools/plotProfile/{{sample}}.mLb.clN"
+
+
+# DEEPTOOLS_COMPUTEMATRIX
+rule deeptools_computematrix:
+    input:
+        bigwig=bigwig("{sample}"),
+        bed=GENE_BED,
+    output:
+        mat=f"{PROFILE}.computeMatrix.mat.gz",
+        tab=f"{PROFILE}.computeMatrix.vals.mat.tab",
+    params:
+        args=args("computematrix"),
+    container:
+        container_path("deeptools")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.bigwig}) $(basename {input.bigwig})
+        ln -s $(realpath {input.bed}) {GENE_BED_NAME}
+        p={wildcards.sample}.mLb.clN
+        computeMatrix {params.args} --regionsFileName {GENE_BED_NAME} --scoreFileName $(basename {input.bigwig}) \
+            --outFileName $p.computeMatrix.mat.gz --outFileNameMatrix $p.computeMatrix.vals.mat.tab \
+            --numberOfProcessors {threads}
+        mv $p.computeMatrix.mat.gz {output.mat}
+        mv $p.computeMatrix.vals.mat.tab {output.tab}
+        """
+
+
+# DEEPTOOLS_PLOTPROFILE
+rule deeptools_plotprofile:
+    input:
+        f"{PROFILE}.computeMatrix.mat.gz",
+    output:
+        pdf=f"{PROFILE}.plotProfile.pdf",
+        tab=f"{PROFILE}.plotProfile.tab",
+    container:
+        container_path("deeptools")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input}) $(basename {input})
+        p={wildcards.sample}.mLb.clN
+        plotProfile --matrixFile $(basename {input}) --outFileName $p.plotProfile.pdf --outFileNameData $p.plotProfile.tab
+        mv $p.plotProfile.pdf {output.pdf}
+        mv $p.plotProfile.tab {output.tab}
+        """
+
+
+# DEEPTOOLS_PLOTHEATMAP
+rule deeptools_plotheatmap:
+    input:
+        f"{PROFILE}.computeMatrix.mat.gz",
+    output:
+        pdf=f"{PROFILE}.plotHeatmap.pdf",
+        tab=f"{PROFILE}.plotHeatmap.mat.tab",
+    container:
+        container_path("deeptools")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input}) $(basename {input})
+        p={wildcards.sample}.mLb.clN
+        plotHeatmap --matrixFile $(basename {input}) --outFileName $p.plotHeatmap.pdf --outFileNameMatrix $p.plotHeatmap.mat.tab
+        mv $p.plotHeatmap.pdf {output.pdf}
+        mv $p.plotHeatmap.mat.tab {output.tab}
+        """
+
+
+def ip_control_bams(s):
+    ctrl = SAMPLES[s]["control"]
+    return {"ip": clean_bam(s), "ip_bai": f"{clean_bam(s)}.bai",
+            "control": clean_bam(ctrl), "control_bai": f"{clean_bam(ctrl)}.bai"}
+
+
+LINK_IP_CONTROL = """
+        for f in {input.ip} {input.ip_bai} {input.control} {input.control_bai}; do
+            ln -s $(realpath $f) $(basename $f)
+        done
+"""
+
+
+# DEEPTOOLS_PLOTFINGERPRINT (IP + its control)
+rule deeptools_plotfingerprint:
+    input:
+        unpack(lambda wc: ip_control_bams(wc.sample)),
+    output:
+        pdf=f"{ML}/deepTools/plotFingerprint/{{sample}}.mLb.clN.plotFingerprint.pdf",
+        raw=f"{ML}/deepTools/plotFingerprint/{{sample}}.mLb.clN.plotFingerprint.raw.txt",
+        qc=f"{ML}/deepTools/plotFingerprint/{{sample}}.mLb.clN.plotFingerprint.qcmetrics.txt",
+    params:
+        args=lambda wc: join_args([args("plotfingerprint"), f"--numberOfSamples {config['fingerprint_bins']}",
+                                   f"--labels {wc.sample} {SAMPLES[wc.sample]['control']}"]),
+        extend_reads=lambda wc: (f"--extendReads {config['fragment_size']}"
+                           if SAMPLES[wc.sample]["single_end"] and float(config["fragment_size"] or 0) > 0 else ""),
+    container:
+        container_path("deeptools")
+    threads: res("process_high")["threads"]
+    resources:
+        mem_mb=res("process_high")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        LINK_IP_CONTROL + """
+        p={wildcards.sample}.mLb.clN
+        plotFingerprint {params.args} {params.extend_reads} \
+            --bamfiles $(basename {input.ip}) $(basename {input.control}) \
+            --plotFile $p.plotFingerprint.pdf --outRawCounts $p.plotFingerprint.raw.txt \
+            --outQualityMetrics $p.plotFingerprint.qcmetrics.txt --numberOfProcessors {threads}
+        mv $p.plotFingerprint.pdf {output.pdf}
+        mv $p.plotFingerprint.raw.txt {output.raw}
+        mv $p.plotFingerprint.qcmetrics.txt {output.qc}
+        """
+
+
+# =============================================================================
+# BAM_PEAKS_CALL_QC_ANNOTATE_MACS3_HOMER
+# =============================================================================
+
+# KHMER_UNIQUEKMERS (effective genome size when macs_gsize is not given)
+rule khmer_uniquekmers:
+    input:
+        FASTA,
+    output:
+        report=f"{W}/khmer/report.txt",
+        kmers=f"{W}/khmer/kmers.txt",
+    params:
+        k=param("read_length"),
+    container:
+        container_path("khmer")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input}) {FASTA_NAME}
+        unique-kmers.py -k {params.k} -R report.txt {FASTA_NAME}
+        grep ^number report.txt | sed 's/^.*:.[[:blank:]]//g' > kmers.txt
+        mv report.txt {output.report}
+        mv kmers.txt {output.kmers}
+        """
+
+
+def macs3_args():
+    """conf/modules.config MACS3_CALLPEAK ext.args, with the module's --format handling."""
+    parts = [args("macs3"),
+             "" if NARROW else f"--broad --broad-cutoff {config['broad_cutoff']}",
+             "--bdg --SPMR" if flag("save_macs_pileup") else "",
+             f"--qvalue {param('macs_fdr')}" if param("macs_fdr") else "",
+             f"--pvalue {param('macs_pvalue')}" if param("macs_pvalue") else "",
+             "--format BAM" if ALIGNER == "chromap" else ""]
+    tokens = join_args(parts).split()
+    fmt = None
+    if "--format" in tokens:
+        i = tokens.index("--format")
+        fmt = tokens[i + 1]
+        del tokens[i:i + 2]
+    return " ".join(tokens), fmt
+
+
+MACS3_ARGS, MACS3_FORMAT = macs3_args()
+
+
+def macs3_outputs(s):
+    out = {"peak": f"{MACS}/{s}_peaks.{PEAK_EXT}", "xls": f"{MACS}/{s}_peaks.xls"}
+    if NARROW:
+        out["summits"] = f"{MACS}/{s}_summits.bed"
+    else:
+        out["gapped"] = f"{MACS}/{s}_peaks.gappedPeak"
+    if flag("save_macs_pileup"):
+        out["treat_bdg"] = f"{MACS}/{s}_treat_pileup.bdg"
+        out["control_bdg"] = f"{MACS}/{s}_control_lambda.bdg"
+    return out
+
+
+# MACS3_CALLPEAK (IP vs control)
+rule macs3_callpeak:
+    input:
+        unpack(lambda wc: ip_control_bams(wc.sample)),
+        kmers=[] if param("macs_gsize") else f"{W}/khmer/kmers.txt",
+    output:
+        **macs3_outputs("{sample}"),
+    params:
+        args=MACS3_ARGS,
+        format=lambda wc: MACS3_FORMAT or ("BAM" if SAMPLES[wc.sample]["single_end"] else "BAMPE"),
+        gsize=param("macs_gsize") or "",
+        outdir=MACS,
+    container:
+        container_path("macs3")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        LINK_IP_CONTROL + """
+        GSIZE="{params.gsize}"
+        if [ -z "$GSIZE" ]; then GSIZE=$(tr -d '[:space:]' < {input.kmers}); fi
+        macs3 callpeak {params.args} --gsize $GSIZE --format {params.format} --name {wildcards.sample} \
+            --treatment $(basename {input.ip}) --control $(basename {input.control})
+        mkdir -p {params.outdir}
+        for f in {output}; do mv $(basename $f) $f; done
+        """
+
+
+# Groovy filter in BAM_PEAKS_CALL_QC_ANNOTATE_MACS3_HOMER: peaks.size() > 0
+checkpoint peak_summary:
+    input:
+        lambda wc: [peak_file(s) for s in ip_samples()],
+    output:
+        f"{W}/status/peak_summary.json",
+    params:
+        samples=lambda wc: ip_samples(),
+    run:
+        sizes = {s: os.path.getsize(f) for s, f in zip(params.samples, input)}
+        with open(output[0], "w") as fh:
+            json.dump(sizes, fh, indent=1)
+
+
+# FRIP_SCORE
+rule frip_score:
+    input:
+        bam=clean_bam("{sample}"),
+        peak=peak_file("{sample}"),
+    output:
+        f"{W}/frip/{{sample}}.FRiP.txt",
+    params:
+        args=args("frip"),
+    container:
+        container_path("frip")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        bam=$(basename {input.bam}); peak=$(basename {input.peak})
+        ln -s $(realpath {input.bam}) $bam
+        ln -s $(realpath {input.peak}) $peak
+        READS_IN_PEAKS=$(intersectBed -a $bam -b $peak {params.args} | awk -F '\\t' '{{sum += $NF}} END {{print sum}}')
+        samtools flagstat $bam > $bam.flagstat
+        grep 'mapped (' $bam.flagstat | grep -v "primary" | awk -v a="$READS_IN_PEAKS" -v OFS='\\t' '{{print "{wildcards.sample}", a/$1}}' > {wildcards.sample}.FRiP.txt
+        mv {wildcards.sample}.FRiP.txt {output}
+        """
+
+
+# MULTIQC_CUSTOM_PEAKS
+rule multiqc_custom_peaks:
+    input:
+        peak=peak_file("{sample}"),
+        frip=f"{W}/frip/{{sample}}.FRiP.txt",
+        count_header=f"{ASSETS}/multiqc/peak_count_header.txt",
+        frip_header=f"{ASSETS}/multiqc/frip_score_header.txt",
+    output:
+        peak_count=f"{MACS}/qc/{{sample}}.peak_count_mqc.tsv",
+        frip=f"{MACS}/qc/{{sample}}.FRiP_mqc.tsv",
+    container:
+        container_path("ubuntu20")
+    threads: res("process_default")["threads"]
+    resources:
+        mem_mb=res("process_default")["mem_mb"],
+    shell:
+        """
+        cat {input.peak} | wc -l | awk -v OFS='\\t' '{{ print "{wildcards.sample}", $1 }}' | cat {input.count_header} - > {output.peak_count}
+        cat {input.frip_header} {input.frip} > {output.frip}
+        """
+
+
+# HOMER_ANNOTATEPEAKS (per-sample peaks)
+rule homer_annotatepeaks:
+    input:
+        peak=peak_file("{sample}"),
+        fasta=FASTA,
+        gtf=GTF,
+    output:
+        f"{MACS}/{{sample}}_peaks.annotatePeaks.txt",
+    params:
+        args=args("homer_annotatepeaks"),
+    container:
+        container_path("homer")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.peak}) $(basename {input.peak})
+        ln -s $(realpath {input.fasta}) {FASTA_NAME}
+        ln -s $(realpath {input.gtf}) {GTF_NAME}
+        annotatePeaks.pl $(basename {input.peak}) {FASTA_NAME} {params.args} -gtf {GTF_NAME} -cpu {threads} \
+            > {wildcards.sample}_peaks.annotatePeaks.txt
+        mv {wildcards.sample}_peaks.annotatePeaks.txt {output}
+        """
+
+
+# Nextflow's collect() order is task-completion order; sample order here is sorted.
+def collected_peaks(wc):
+    return [peak_file(s) for s in sorted(peak_samples())]
+
+
+# PLOT_MACS3_QC
+rule plot_macs3_qc:
+    input:
+        collected_peaks,
+    output:
+        txt=f"{MACS}/qc/macs3_peak.summary.txt",
+        pdf=f"{MACS}/qc/macs3_peak.plots.pdf",
+    params:
+        args=args("plot_macs3_qc"),
+        files=lambda wc, input: ",".join(os.path.basename(f) for f in input),
+        names=lambda wc, input: ",".join(os.path.basename(f).replace(f"_peaks.{PEAK_EXT}", "") for f in input),
+    container:
+        container_path("rplots")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        for f in {input}; do ln -s $(realpath $f) $(basename $f); done
+        {SCRIPTS}/plot_macs3_qc.r -i {params.files} -s {params.names} {params.args}
+        mv macs3_peak.summary.txt {output.txt}
+        mv macs3_peak.plots.pdf {output.pdf}
+        """
+
+
+# PLOT_HOMER_ANNOTATEPEAKS
+rule plot_homer_annotatepeaks:
+    input:
+        annos=lambda wc: [f"{MACS}/{s}_peaks.annotatePeaks.txt" for s in sorted(peak_samples())],
+        header=f"{ASSETS}/multiqc/peak_annotation_header.txt",
+    output:
+        txt=f"{MACS}/qc/macs3_annotatePeaks.summary.txt",
+        pdf=f"{MACS}/qc/macs3_annotatePeaks.plots.pdf",
+        tsv=f"{MACS}/qc/macs3_annotatePeaks.summary_mqc.tsv",
+    params:
+        args=args("plot_homer_annotatepeaks"),
+        files=lambda wc, input: ",".join(os.path.basename(f) for f in input.annos),
+        names=lambda wc, input: ",".join(os.path.basename(f).replace("_peaks.annotatePeaks.txt", "") for f in input.annos),
+    container:
+        container_path("rplots")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        for f in {input.annos}; do ln -s $(realpath $f) $(basename $f); done
+        ln -s $(realpath {input.header}) $(basename {input.header})
+        p=macs3_annotatePeaks
+        {SCRIPTS}/plot_homer_annotatepeaks.r -i {params.files} -s {params.names} -p $p {params.args}
+        find ./ -type f -name "*summary.txt" -exec cat {{}} \\; | cat $(basename {input.header}) - > $p.summary_mqc.tsv
+        mv $p.summary.txt {output.txt}
+        mv $p.plots.pdf {output.pdf}
+        mv $p.summary_mqc.tsv {output.tsv}
+        """
+
+
+# =============================================================================
+# BED_CONSENSUS_QUANTIFY_QC_BEDTOOLS_FEATURECOUNTS_DESEQ2
+# =============================================================================
+CONSENSUS = f"{MACS}/consensus/{{antibody}}/{{antibody}}.consensus_peaks"
+
+
+# MACS3_CONSENSUS (runs when the antibody has several groups or replicates)
+rule macs3_consensus:
+    input:
+        lambda wc: sorted((peak_file(s) for s in antibody_groups()[wc.antibody]["peaks"]), key=os.path.basename),
+    output:
+        bed=f"{CONSENSUS}.bed",
+        saf=f"{CONSENSUS}.saf",
+        boolean=f"{CONSENSUS}.boolean.txt",
+        intersect=f"{CONSENSUS}.boolean.intersect.txt",
+        pdf=f"{CONSENSUS}.boolean.intersect.plot.pdf",
+        antibody=f"{CONSENSUS}.antibody.txt",
+        txt=f"{W}/consensus/{{antibody}}.consensus_peaks.txt",
+    params:
+        mergecols=",".join(str(i) for i in range(2, 11 if NARROW else 10)),
+        collapsecols=",".join(["collapse"] * (9 if NARROW else 8)),
+        files=lambda wc, input: " ".join(os.path.basename(f) for f in input),
+        names=lambda wc, input: ",".join(os.path.basename(f) for f in input).replace(f"_peaks.{PEAK_EXT}", ""),
+        min_reps=config["min_reps_consensus"],
+        narrow="--is_narrow_peak" if NARROW else "",
+    container:
+        container_path("consensus")
+    threads: res("process_default")["threads"]
+    resources:
+        mem_mb=res("process_default")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        for f in {input}; do ln -s $(realpath $f) $(basename $f); done
+        p={wildcards.antibody}.consensus_peaks
+        sort -T '.' -k1,1 -k2,2n {params.files} \
+            | mergeBed -c {params.mergecols} -o {params.collapsecols} > $p.txt
+        python3 {SCRIPTS}/macs3_merged_expand.py $p.txt {params.names} $p.boolean.txt \
+            --min_replicates {params.min_reps} {params.narrow}
+        awk -v FS='\\t' -v OFS='\\t' 'FNR > 1 {{ print $1, $2, $3, $4, "0", "+" }}' $p.boolean.txt > $p.bed
+        printf 'GeneID\\tChr\\tStart\\tEnd\\tStrand\\n' > $p.saf
+        awk -v FS='\\t' -v OFS='\\t' 'FNR > 1 {{ print $4, $1, $2, $3,  "+" }}' $p.boolean.txt >> $p.saf
+        {SCRIPTS}/plot_peak_intersect.r -i $p.boolean.intersect.txt -o $p.boolean.intersect.plot.pdf
+        printf '%s\\t%s\\n' "$p.bed" "{wildcards.antibody}/$p.bed" > $p.antibody.txt
+        mv $p.bed {output.bed}
+        mv $p.saf {output.saf}
+        mv $p.boolean.txt {output.boolean}
+        mv $p.boolean.intersect.txt {output.intersect}
+        mv $p.boolean.intersect.plot.pdf {output.pdf}
+        mv $p.antibody.txt {output.antibody}
+        mv $p.txt {output.txt}
+        """
+
+
+# BED_CONSENSUS_...:HOMER_ANNOTATEPEAKS
+rule homer_annotatepeaks_consensus:
+    input:
+        bed=f"{CONSENSUS}.bed",
+        fasta=FASTA,
+        gtf=GTF,
+    output:
+        f"{CONSENSUS}.annotatePeaks.txt",
+    params:
+        args=args("homer_annotatepeaks"),
+    container:
+        container_path("homer")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.bed}) $(basename {input.bed})
+        ln -s $(realpath {input.fasta}) {FASTA_NAME}
+        ln -s $(realpath {input.gtf}) {GTF_NAME}
+        p={wildcards.antibody}.consensus_peaks
+        annotatePeaks.pl $(basename {input.bed}) {FASTA_NAME} {params.args} -gtf {GTF_NAME} -cpu {threads} \
+            > $p.annotatePeaks.txt
+        mv $p.annotatePeaks.txt {output}
+        """
+
+
+# ANNOTATE_BOOLEAN_PEAKS
+rule annotate_boolean_peaks:
+    input:
+        boolean=f"{CONSENSUS}.boolean.txt",
+        homer=f"{CONSENSUS}.annotatePeaks.txt",
+    output:
+        f"{CONSENSUS}.boolean.annotatePeaks.txt",
+    container:
+        container_path("ubuntu20")
+    threads: res("process_low")["threads"]
+    resources:
+        mem_mb=res("process_low")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        cut -f2- {input.homer} | awk 'NR==1; NR > 1 {{print $0 | "sort -T '.' -k1,1 -k2,2n"}}' | cut -f6- > tmp.txt
+        paste {input.boolean} tmp.txt > {output}
+        """
+
+
+def antibody_bams(wc):
+    """ch_antibody_bams: IP BAMs of the antibody (sorted by file name)."""
+    bams = [clean_bam(s) for s in ip_samples() if SAMPLES[s]["antibody"] == wc.antibody]
+    return sorted(bams, key=os.path.basename)
+
+
+# SUBREAD_FEATURECOUNTS (consensus meta has no single_end, so -p is always set)
+rule featurecounts:
+    input:
+        bams=antibody_bams,
+        saf=f"{CONSENSUS}.saf",
+    output:
+        counts=f"{CONSENSUS}.featureCounts.txt",
+        summary=f"{CONSENSUS}.featureCounts.txt.summary",
+    params:
+        args=args("featurecounts"),
+        bams=lambda wc, input: " ".join(os.path.basename(f) for f in input.bams),
+    container:
+        container_path("subread")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        for f in {input.bams}; do ln -s $(realpath $f) $(basename $f); done
+        ln -s $(realpath {input.saf}) $(basename {input.saf})
+        p={wildcards.antibody}.consensus_peaks
+        featureCounts {params.args} -p -T {threads} -a $(basename {input.saf}) -s 0 \
+            -o $p.featureCounts.txt {params.bams}
+        mv $p.featureCounts.txt {output.counts}
+        mv $p.featureCounts.txt.summary {output.summary}
+        """
+
+
+def deseq2_names(ab):
+    p = f"{ab}.consensus_peaks"
+    return [f"{p}.{x}" for x in ("dds.RData", "rds", "plots.pdf", "pca.vals.txt", "pca.vals_mqc.tsv",
+                                 "sample.dists.txt", "sample.dists_mqc.tsv")] + ["R_sessionInfo.log", "size_factors"]
+
+
+# DESEQ2_QC (runs when the antibody has several groups and replicates).
+# ${task.index} in the MultiQC section ids is the antibody's 1-based rank.
+rule deseq2_qc:
+    input:
+        counts=f"{CONSENSUS}.featureCounts.txt",
+        pca_header=f"{ASSETS}/multiqc/deseq2_pca_header.txt",
+        clust_header=f"{ASSETS}/multiqc/deseq2_clustering_header.txt",
+        peaks=f"{W}/status/peak_summary.json",  # params.index reads this checkpoint
+    output:
+        **{f"f{i}": f"{MACS}/consensus/{{antibody}}/deseq2/{n}"
+           for i, n in enumerate(deseq2_names("{antibody}")[:-1])},
+        size_factors=directory(f"{MACS}/consensus/{{antibody}}/deseq2/size_factors"),
+    params:
+        args=args("deseq2_qc") + (" --vst TRUE" if flag("deseq2_vst") else ""),
+        index=lambda wc: deseq2_antibodies().index(wc.antibody) + 1,
+        outdir=f"{MACS}/consensus/{{antibody}}/deseq2",
+    container:
+        container_path("deseq2")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        ln -s $(realpath {input.counts}) $(basename {input.counts})
+        p={wildcards.antibody}.consensus_peaks
+        {SCRIPTS}/deseq2_qc.r --count_file $(basename {input.counts}) --outdir ./ --outprefix $p \
+            --cores {threads} {params.args}
+        sed 's/deseq2_pca/deseq2_pca_{params.index}/g' <{input.pca_header} >tmp.txt
+        sed -i -e 's/DESeq2 /{wildcards.antibody} DESeq2 /g' tmp.txt
+        cat tmp.txt $p.pca.vals.txt > $p.pca.vals_mqc.tsv
+        sed 's/deseq2_clustering/deseq2_clustering_{params.index}/g' <{input.clust_header} >tmp.txt
+        sed -i -e 's/DESeq2 /{wildcards.antibody} DESeq2 /g' tmp.txt
+        cat tmp.txt $p.sample.dists.txt > $p.sample.dists_mqc.tsv
+        mkdir -p {params.outdir}
+        for f in $p.dds.RData $p.rds $p.plots.pdf $p.pca.vals.txt $p.pca.vals_mqc.tsv \
+                 $p.sample.dists.txt $p.sample.dists_mqc.tsv R_sessionInfo.log size_factors; do
+            mv $f {params.outdir}/
+        done
+        """
+
+
+# =============================================================================
+# IGV session
+# =============================================================================
+def igv_inputs(wc):
+    abs_ = consensus_antibodies()
+    return {
+        "fasta": FASTA,
+        "bigwigs": [bigwig(s) for s in samples_ok()],
+        "peaks": [peak_file(s) for s in peak_samples()],
+        "consensus": [f"{consensus_prefix(ab)}.bed" for ab in abs_],
+        "mappings": [f"{consensus_prefix(ab)}.antibody.txt" for ab in abs_],
+    }
+
+
+IGV_FASTA_OUT = [] if FASTA == f"{O}/genome/{FASTA_NAME}" else [f"{O}/genome/{FASTA_NAME}"]
+
+
+# IGV (bin/igv_files_to_session.py; also publishes the FASTA to genome/)
+rule igv:
+    input:
+        unpack(igv_inputs),
+    output:
+        *IGV_FASTA_OUT,
+        xml=f"{O}/igv/{PEAK_TYPE}/igv_session.xml",
+        txt=f"{O}/igv/{PEAK_TYPE}/igv_files.txt",
+    params:
+        consensus_dir=f"{ALIGNER}/merged_library/macs3/{PEAK_TYPE}/consensus/*",
+        fasta_out=IGV_FASTA_OUT,
+    container:
+        container_path("python")
+    threads: res("process_default")["threads"]
+    resources:
+        mem_mb=res("process_default")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        d=stage/{ALIGNER}/merged_library
+        mkdir -p $d/bigwig $d/macs3/{PEAK_TYPE}/consensus stage/mappings
+        ln -s $(realpath {input.fasta}) stage/{FASTA_NAME}
+        for f in {input.bigwigs}; do ln -s $(realpath $f) $d/bigwig/$(basename $f); done
+        for f in {input.peaks}; do ln -s $(realpath $f) $d/macs3/{PEAK_TYPE}/$(basename $f); done
+        for f in {input.consensus}; do ln -s $(realpath $f) $d/macs3/{PEAK_TYPE}/consensus/$(basename $f); done
+        for f in {input.mappings}; do ln -s $(realpath $f) stage/mappings/$(basename $f); done
+        cd stage
+        find * -type l -name "*.bigWig" -exec echo -e ""{{}}"\\t0,0,178" \\; > bigwig.igv.txt
+        find * -type l -name "*Peak" -exec echo -e ""{{}}"\\t0,0,178" \\; > peaks.igv.txt
+        # Avoid error when consensus not produced
+        find * -type l -name "*.bed" -exec echo -e ""{{}}"\\t0,0,178" \\; | {{ grep "^{params.consensus_dir}" || test $? = 1; }} > consensus.igv.txt
+        touch replace_paths.txt
+        if [ -d "mappings" ]; then
+            cat mappings/* > replace_paths.txt
+        fi
+        cat *.igv.txt > igv_files_orig.txt
+        python3 {SCRIPTS}/igv_files_to_session.py igv_session.xml igv_files_orig.txt replace_paths.txt \
+            ../../genome/{FASTA_NAME} --path_prefix '../../'
+        cd ..
+        mv stage/igv_session.xml {output.xml}
+        mv stage/igv_files.txt {output.txt}
+        for f in {params.fasta_out}; do cp -L {input.fasta} $f; done
+        """
+
+
+# =============================================================================
+# MULTIQC (local module: inputs staged into fixed sub-directories)
+# =============================================================================
+def multiqc_inputs(wc):
+    libs = libs_ok()
+    samples = samples_ok()
+    ips = ip_samples()
+    peaks = peak_samples()
+    abs_ = consensus_antibodies()
+    d = {}
+    d["fastqc"] = [] if SKIP_FASTQC else [f for l in LIBS for f in raw_fastqc(l, "zip")]
+    d["trimgalore/fastqc"] = [] if SKIP_TRIM else [f for l in LIBS for f in trim_fastqc(l, "zip")]
+    d["trimgalore"] = [] if SKIP_TRIM else [f for l in LIBS for f in trim_logs(l)]
+    d["alignment/library"] = [f for l in libs for f in stats_files(lib_bam(l))]
+    d["alignment/merged_library/unfiltered"] = [f for s in samples for f in stats_files(mkd_bam(s))]
+    d["alignment/merged_library/unfiltered/picard_metrics"] = [
+        f"{ML}/picard_metrics/{s}.mLb.mkD.sorted.MarkDuplicates.metrics.txt" for s in samples]
+    d["alignment/merged_library/filtered"] = [f for s in samples for f in stats_files(clean_bam(s))]
+    d["alignment/merged_library/filtered/picard_metrics"] = (
+        [] if flag("skip_picard_metrics") else [f for s in samples for f in cmm_metrics(s)])
+    d["preseq"] = [] if flag("skip_preseq") else [f"{ML}/preseq/{s}.mLb.mkD.lc_extrap.txt" for s in samples]
+    d["deeptools"] = [] if flag("skip_plot_profile") else [
+        f"{ML}/deepTools/plotProfile/{s}.mLb.clN.plotProfile.tab" for s in samples]
+    if not flag("skip_plot_fingerprint"):
+        d["deeptools"] += [f"{ML}/deepTools/plotFingerprint/{s}.mLb.clN.plotFingerprint.raw.txt" for s in ips]
+    d["phantompeakqualtools"] = [] if flag("skip_spp") else [
+        f"{ML}/phantompeakqualtools/{s}.{x}" for s in samples
+        for x in ("spp.out", "spp_nsc_mqc.tsv", "spp_rsc_mqc.tsv", "spp_correlation_mqc.tsv")]
+    d["macs3/peaks"] = [f"{MACS}/qc/{s}.{x}" for s in peaks for x in ("FRiP_mqc.tsv", "peak_count_mqc.tsv")]
+    d["macs3/annotation"] = ([f"{MACS}/qc/macs3_annotatePeaks.summary_mqc.tsv"]
+                             if peaks and not SKIP_ANNOT and not flag("skip_peak_qc") else [])
+    d["macs3/featurecounts"] = [f"{consensus_prefix(ab)}.featureCounts.txt.summary" for ab in abs_]
+    d["deseq2"] = [f"{MACS}/consensus/{ab}/deseq2/{ab}.consensus_peaks.{x}"
+                   for ab in deseq2_antibodies() for x in ("pca.vals_mqc.tsv", "sample.dists_mqc.tsv")]
+    return d
+
+
+def multiqc_files(wc):
+    return [f for files in multiqc_inputs(wc).values() for f in files]
+
+
+def multiqc_stage_cmd(wc):
+    """Link every input into its staging sub-directory (path('<dir>/*') inputs)."""
+    cmds = []
+    for sub, files in multiqc_inputs(wc).items():
+        for f in files:
+            cmds.append(f"mkdir -p stage/{sub} && ln -s $(realpath {f}) stage/{sub}/{os.path.basename(f)}")
+    return "\n".join(cmds)
+
+
+# MULTIQC. nf-core also feeds workflow_summary_mqc.yaml and the collated
+# software versions; those are Nextflow run metadata and are not produced here.
+rule multiqc:
+    input:
+        files=multiqc_files,
+        config=f"{ASSETS}/multiqc_config.yml",
+        extra_config=param("multiqc_config") or [],
+    output:
+        report=f"{O}/multiqc/{PEAK_TYPE}/multiqc_report.html",
+        data=directory(f"{O}/multiqc/{PEAK_TYPE}/multiqc_data"),
+        plots=directory(f"{O}/multiqc/{PEAK_TYPE}/multiqc_plots"),
+    params:
+        title=f"--title \"{config['multiqc_title']}\"" if param("multiqc_title") else "",
+        custom=lambda wc, input: f"--config {os.path.abspath(input.extra_config)}" if input.extra_config else "",
+        stage=multiqc_stage_cmd,
+    container:
+        container_path("multiqc")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shadow:
+        "minimal"
+    shell:
+        """
+        mkdir -p stage
+        ln -s $(realpath {input.config}) stage/multiqc_config.yml
+        {params.stage}
+        cd stage
+        multiqc -f {params.title} {params.custom} .
+        cd ..
+        mv stage/multiqc_report.html {output.report}
+        mv stage/multiqc_data {output.data}
+        mv stage/multiqc_plots {output.plots}
+        """

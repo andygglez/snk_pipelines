@@ -1,0 +1,349 @@
+# snk-chipseq — pipeline diagrams
+
+Snakemake port of **nf-core/chipseq 2.1.0**, with all four aligners (bwa, bowtie2, chromap, star),
+MACS3 narrow/broad peaks, HOMER, consensus peaks, featureCounts, DESeq2 QC, IGV and MultiQC.
+These diagrams show the flow of commands and data through `Snakefile`, and how each key in
+`config/config.yaml` changes those commands. They are written in Mermaid. You can view them on
+GitHub, in VS Code (with a Mermaid preview extension), or by opening `DIAGRAMS.html` in a browser.
+
+**How to read them**
+
+- `«key»` inside a command is a value from `config/config.yaml`. `«args.X»` is the fixed tool argument string under `args:` (nf-core `ext.args`).
+- Dashed orange boxes run only under some settings (the condition is on the box).
+- Pink hexagons are **gates**: checkpoints that drop libraries or samples.
+- Naming follows nf-core: a **library** (`<sample>_REP<n>_T<m>`) is one samplesheet row. A **merged library** (`<sample>_REP<n>`, files `.mLb.`) is all runs of one replicate. An **IP** sample is one with a `control` column; peaks are called IP vs its control.
+
+---
+
+## 1. Analysis overview
+
+```mermaid
+flowchart TD
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef gate fill:#fce7f3,stroke:#db2777,color:#111
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    SS[/"samplesheet<br/>sample, fastq_1, fastq_2, replicate, antibody, control, control_replicate"/]:::input
+    REF[/"FASTA + GTF/GFF, optional blacklist, index"/]:::input
+
+    subgraph G["1 · Reference preparation"]
+        GR["gene BED · chrom sizes · include-regions BED (minus blacklist)<br/>aligner index · effective genome size (khmer)"]:::step
+    end
+    subgraph L["2 · Per library"]
+        FQ["FastQC"]:::opt
+        TG["Trim Galore"]:::opt
+        G1{{"gate: min_trimmed_reads"}}:::gate
+        AL["align: bwa / bowtie2 / chromap / STAR<br/>→ coordinate-sorted BAM"]:::step
+    end
+    subgraph M["3 · Per merged library (replicate)"]
+        MG["merge runs (Picard)"]:::step
+        MD["mark duplicates (Picard)"]:::step
+        FL["filter: blacklist, unmapped, dups, multimappers,<br/>bamtools rules, PE orphans → clN BAM"]:::out
+        QC["Preseq · Picard metrics · SPP · deepTools profile"]:::opt
+        BW["CPM-scaled bigWig"]:::out
+    end
+    subgraph P["4 · Peaks (IP vs control)"]
+        FP["deepTools plotFingerprint"]:::opt
+        MC["MACS3 callpeak (broad or narrow)"]:::out
+        G2{{"gate: non-empty peak file"}}:::gate
+        AN["FRiP · peak count · HOMER annotation · QC plots"]:::opt
+    end
+    subgraph C["5 · Per antibody"]
+        CS["consensus peaks"]:::opt
+        FC["featureCounts on consensus"]:::opt
+        DE["DESeq2 QC"]:::opt
+    end
+    OUT["IGV session · MultiQC report"]:::out
+
+    REF --> GR
+    SS --> FQ & TG
+    TG --> G1 --> AL
+    GR --> AL
+    AL --> MG --> MD --> FL --> QC & BW
+    FL --> FP & MC
+    MC --> G2 --> AN & CS
+    CS --> FC --> DE
+    BW & AN & DE & QC --> OUT
+```
+
+---
+
+## 2. Command flow (what each rule runs)
+
+### 2a · Reference preparation (PREPARE_GENOME)
+
+```mermaid
+flowchart TD
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    FA[/"«fasta»"/]:::input
+    GT[/"«gtf» or «gff»"/]:::input
+    BL[/"«blacklist»"/]:::input
+
+    GZ["gunzip — .gz FASTA/GTF/GFF/gene BED/blacklist"]:::opt
+    GFR["gffread<br/>gffread «args.gffread» -o null.gtf<br/>only if no «gtf»"]:::opt
+    G2B["gtf2bed<br/>gtf2bed GTF → gene BED<br/>unless «gene_bed»"]:::opt
+    CS["custom_getchromsizes<br/>samtools faidx · cut -f1,2"]:::out
+    BR["genome_blacklist_regions<br/>with blacklist: sortBed | complementBed<br/>without: whole chromosomes<br/>→ include_regions.bed"]:::step
+    UT["untar — index given as .tar.gz"]:::opt
+    subgraph IDX["index for «aligner» — skipped if «bwa_index» / «bowtie2_index» / «chromap_index» / «star_index» is set"]
+        BWI["bwa_index<br/>bwa index"]:::opt
+        B2I["bowtie2_build<br/>bowtie2-build"]:::opt
+        CHI["chromap_index<br/>chromap -i"]:::opt
+        STI["star_genomegenerate<br/>STAR --runMode genomeGenerate --sjdbGTFfile<br/>--genomeSAindexNbases from genome size"]:::opt
+    end
+    KH["khmer_uniquekmers<br/>unique-kmers.py -k «read_length»<br/>only if «macs_gsize» is empty"]:::opt
+
+    FA --> GZ
+    GT --> GZ
+    GT --> GFR --> G2B
+    GT --> G2B
+    FA --> CS --> BR
+    BL --> BR
+    FA --> BWI & B2I & CHI & STI & KH
+    GT --> STI
+    UT -.-> IDX
+```
+
+### 2b · Reads to filtered BAM
+
+```mermaid
+flowchart TD
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef gate fill:#fce7f3,stroke:#db2777,color:#111
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    SS[/"«input» → samplesheet_check<br/>check_samplesheet.py"/]:::input
+    FQ["fastqc_se / fastqc_pe<br/>fastqc «args.fastqc»<br/>unless «skip_fastqc» or «skip_qc»"]:::opt
+    TG["trimgalore_se / trimgalore_pe<br/>trim_galore «args.trimgalore» [--nextseq «trim_nextseq»]<br/>[--clip_r1 «clip_r1»] [--clip_r2 «clip_r2»]<br/>[--three_prime_clip_r1/_r2 ...] --cores N [--paired] --gzip<br/>unless «skip_trimming»"]:::opt
+    G1{{"trim_status → trim_summary checkpoint<br/>reads ≥ «min_trimmed_reads»"}}:::gate
+
+    subgraph ALN["one aligner, chosen by «aligner»"]
+        BWA["bwa_mem<br/>bwa mem «args.bwa_mem» [-T «bwa_min_score»] -R READ_GROUP<br/>| samtools view «args.bwa_mem_samtools»"]:::opt
+        BT2["bowtie2_align<br/>bowtie2 --rg-id ... [--rg CN:«seq_center»]<br/>[--un-conc-gz if «save_unaligned»] | samtools view"]:::opt
+        CHR["chromap<br/>chromap «args.chromap» -x index -r FASTA<br/>samtools addreplacerg · samtools view -bh"]:::opt
+        STR["star_align<br/>STAR «args.star_align» --outSAMattrRGline ID SM [CN «seq_center»]<br/>[--outReadsUnmapped Fastx if «save_unaligned»]"]:::opt
+    end
+
+    SRT["samtools_sort_library → .Lb.sorted.bam<br/>+ samtools index / stats / flagstat / idxstats"]:::step
+    MRG["picard_mergesamfiles<br/>picard MergeSamFiles «args.picard_mergesamfiles»<br/>(single run: just linked) → .mLb.sorted.bam"]:::step
+    MKD["picard_markduplicates<br/>picard MarkDuplicates «args.picard_markduplicates» → .mLb.mkD.sorted.bam"]:::step
+    BTF["bamtools_filter_se / _pe<br/>samtools view -F 0x004 [PE: -F 0x0008 -f 0x001]<br/>[-F 0x0400 unless «keep_dups»] [-q 1 unless «keep_multi_map»]<br/>-L include_regions.bed<br/>| bamtools filter -script «bamtools_filter_se_config» / «bamtools_filter_pe_config»"]:::step
+    NS["samtools_sort_name (PE)<br/>samtools sort «args.filter_name_sort»"]:::step
+    ORP["bam_remove_orphans (PE)<br/>bampe_rm_orphan.py «args.bam_remove_orphans»"]:::step
+    CLN["samtools_sort_clean (PE) → .mLb.clN.sorted.bam<br/>(SE: bamtools output is already clN)"]:::out
+
+    SS --> FQ
+    SS --> TG --> G1 --> BWA & BT2 & CHR & STR --> SRT --> MRG --> MKD --> BTF
+    BTF -->|PE| NS --> ORP --> CLN
+    BTF -->|SE| CLN
+```
+
+### 2c · Merged-library QC and coverage
+
+```mermaid
+flowchart TD
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    MKD[/".mLb.mkD.sorted.bam"/]
+    CLN[/".mLb.clN.sorted.bam"/]
+    PRE["preseq_lcextrap<br/>preseq lc_extrap «args.preseq» [-pe]<br/>unless «skip_preseq»"]:::opt
+    CMM["picard_collectmultiplemetrics_se / _pe<br/>picard CollectMultipleMetrics «args.picard_collectmultiplemetrics»<br/>unless «skip_picard_metrics»"]:::opt
+    SPP["phantompeakqualtools<br/>Rscript «args.phantompeakqualtools» run_spp.R<br/>unless «skip_spp»"]:::opt
+    SPM["multiqc_custom_phantompeakqualtools<br/>NSC / RSC / cross-correlation tables"]:::opt
+    GC["bedtools_genomecov<br/>scale = 1e6 / mapped reads (flagstat)<br/>bedtools genomecov -bg -scale S [PE: -pc] [SE: -fs «fragment_size»]"]:::step
+    BW["ucsc_bedgraphtobigwig<br/>bedGraphToBigWig → .mLb.clN.bigWig"]:::out
+    CM["deeptools_computematrix<br/>computeMatrix «args.computematrix» -R gene BED -S bigWig<br/>unless «skip_plot_profile»"]:::opt
+    PP["deeptools_plotprofile<br/>plotProfile"]:::opt
+    PH["deeptools_plotheatmap<br/>plotHeatmap"]:::opt
+
+    MKD --> PRE
+    CLN --> CMM & SPP & GC
+    SPP --> SPM
+    GC --> BW --> CM --> PP & PH
+```
+
+### 2d · Peak calling, annotation and consensus
+
+```mermaid
+flowchart TD
+    classDef step fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef opt fill:#fff7ed,stroke:#ea580c,color:#111,stroke-dasharray:5 4
+    classDef gate fill:#fce7f3,stroke:#db2777,color:#111
+    classDef out fill:#dcfce7,stroke:#16a34a,color:#111
+
+    IPC[/"IP clN BAM + its control clN BAM"/]
+    FP["deeptools_plotfingerprint<br/>plotFingerprint «args.plotfingerprint» --numberOfSamples «fingerprint_bins»<br/>[SE: --extendReads «fragment_size»]<br/>unless «skip_plot_fingerprint»"]:::opt
+    MC["macs3_callpeak<br/>macs3 callpeak «args.macs3»<br/>[--broad --broad-cutoff «broad_cutoff» unless «narrow_peak»]<br/>[--bdg --SPMR if «save_macs_pileup»]<br/>[--qvalue «macs_fdr»] [--pvalue «macs_pvalue»]<br/>--gsize «macs_gsize» or khmer count --format BAM / BAMPE"]:::out
+    G2{{"peak_summary checkpoint<br/>keep samples with a non-empty peak file"}}:::gate
+    FR["frip_score<br/>intersectBed «args.frip» / mapped reads"]:::step
+    MCP["multiqc_custom_peaks<br/>peak count + FRiP tables"]:::out
+    HA["homer_annotatepeaks<br/>annotatePeaks.pl peaks FASTA «args.homer_annotatepeaks» -gtf<br/>unless «skip_peak_annotation»"]:::opt
+    PMQ["plot_macs3_qc<br/>plot_macs3_qc.r «args.plot_macs3_qc»"]:::opt
+    PHA["plot_homer_annotatepeaks<br/>plot_homer_annotatepeaks.r «args.plot_homer_annotatepeaks»<br/>both plots unless «skip_peak_qc» or «skip_peak_annotation»"]:::opt
+
+    subgraph AB["per antibody — unless «skip_consensus_peaks»; only if it has several groups or replicates"]
+        CON["macs3_consensus<br/>sort | mergeBed -c ... -o collapse<br/>macs3_merged_expand.py --min_replicates «min_reps_consensus»<br/>→ consensus BED + SAF + boolean table + UpSet plot"]:::opt
+        HAC["homer_annotatepeaks_consensus"]:::opt
+        ABP["annotate_boolean_peaks<br/>paste boolean + HOMER columns"]:::opt
+        FC["featurecounts<br/>featureCounts «args.featurecounts» -p -s 0 -a consensus.saf IP BAMs"]:::opt
+        DQ["deseq2_qc<br/>deseq2_qc.r «args.deseq2_qc» [--vst TRUE if «deseq2_vst»]<br/>needs several groups AND replicates; unless «skip_deseq2_qc»"]:::opt
+    end
+
+    IGV["igv<br/>igv_files_to_session.py — bigWigs, peaks, consensus<br/>unless «skip_igv»"]:::opt
+    MQ["multiqc<br/>multiqc [--title «multiqc_title»] [--config «multiqc_config»]<br/>unless «skip_multiqc»"]:::out
+
+    IPC --> FP
+    IPC --> MC --> G2
+    G2 --> FR --> MCP
+    G2 --> HA --> PHA
+    G2 --> PMQ
+    G2 --> CON --> HAC --> ABP
+    CON --> FC --> DQ
+    G2 --> IGV
+    MCP & PHA & FC & DQ & FP --> MQ
+```
+
+---
+
+## 3. How config switches shape the run
+
+Colours: yellow = config key, blue = derived value, grey = rules affected.
+
+### 3a · Aligner and references
+
+```mermaid
+flowchart LR
+    classDef key fill:#fef9c3,stroke:#ca8a04,color:#111
+    classDef rule fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef derived fill:#e0e7ff,stroke:#4f46e5,color:#111
+
+    A{"«aligner»"}:::key
+    A -->|bwa| A1["bwa_index (unless «bwa_index») → bwa_mem"]:::rule
+    A -->|bowtie2| A2["bowtie2_build (unless «bowtie2_index») → bowtie2_align"]:::rule
+    A -->|chromap| A3["chromap_index (unless «chromap_index») → chromap<br/>MACS3 forced to --format BAM"]:::rule
+    A -->|star| A4["star_genomegenerate (unless «star_index») → star_align<br/>STAR logs published"]:::rule
+    A --> OD["output root: outdir/«aligner»/"]:::derived
+    G{"«macs_gsize» set?"}:::key -->|yes| G1["used directly as --gsize"]:::rule
+    G -->|no| G2["khmer_uniquekmers -k «read_length»<br/>(read_length then required)"]:::rule
+    B{"«blacklist» set?"}:::key -->|yes| B1["include_regions = genome minus blacklist"]:::rule
+    B -->|no| B2["include_regions = whole genome"]:::rule
+    GT{"«gtf» set?"}:::key -->|no| GT1["gffread from «gff»"]:::rule
+    GB{"«gene_bed» set?"}:::key -->|no| GB1["gtf2bed"]:::rule
+```
+
+### 3b · Read filtering
+
+```mermaid
+flowchart LR
+    classDef key fill:#fef9c3,stroke:#ca8a04,color:#111
+    classDef rule fill:#f3f4f6,stroke:#6b7280,color:#111
+
+    T{"«skip_trimming»?"}:::key -->|no| T1["Trim Galore with «clip_r1» «clip_r2»<br/>«three_prime_clip_r1» «three_prime_clip_r2» «trim_nextseq»<br/>then gate «min_trimmed_reads»"]:::rule
+    T -->|yes| T2["raw reads go to the aligner"]:::rule
+    D{"«keep_dups»?"}:::key -->|no| D1["samtools view -F 0x0400 (remove duplicates)"]:::rule
+    M{"«keep_multi_map»?"}:::key -->|no| M1["samtools view -q 1 (remove multimappers)"]:::rule
+    BC["«bamtools_filter_pe_config» / «bamtools_filter_se_config»"]:::key --> BC1["bamtools filter -script (mismatches, insert size, ...)"]:::rule
+    FS["«fragment_size»"]:::key --> FS1["single-end: genomecov -fs, plotFingerprint --extendReads"]:::rule
+```
+
+### 3c · Peak calling and per-antibody analysis
+
+```mermaid
+flowchart TD
+    classDef key fill:#fef9c3,stroke:#ca8a04,color:#111
+    classDef rule fill:#f3f4f6,stroke:#6b7280,color:#111
+    classDef derived fill:#e0e7ff,stroke:#4f46e5,color:#111
+
+    N{"«narrow_peak»?"}:::key
+    N -->|"no (default)"| BR["broad: --broad --broad-cutoff «broad_cutoff»<br/>files .broadPeak + .gappedPeak<br/>outputs under macs3/broad_peak/"]:::derived
+    N -->|yes| NR["narrow: .narrowPeak + summits.bed<br/>outputs under macs3/narrow_peak/"]:::derived
+    TH["«macs_fdr» / «macs_pvalue»"]:::key --> TH1["--qvalue / --pvalue"]:::rule
+    PU["«save_macs_pileup»"]:::key --> PU1["--bdg --SPMR → treat/control bedGraphs"]:::rule
+    BR & NR --> GRP["group peak samples by antibody"]:::derived
+    GRP --> Q1{"several groups or replicates,<br/>and not «skip_consensus_peaks»?"}:::key
+    Q1 -->|yes| CON["macs3_consensus «min_reps_consensus»<br/>+ featureCounts (+ HOMER unless «skip_peak_annotation»)"]:::rule
+    CON --> Q2{"several groups AND replicates,<br/>and not «skip_deseq2_qc»?"}:::key
+    Q2 -->|yes| DQ["deseq2_qc («deseq2_vst»)"]:::rule
+```
+
+### 3d · Optional outputs
+
+```mermaid
+flowchart LR
+    classDef key fill:#fef9c3,stroke:#ca8a04,color:#111
+    classDef rule fill:#f3f4f6,stroke:#6b7280,color:#111
+
+    S1["«skip_fastqc» or «skip_qc»"]:::key --> R1["no FastQC on raw reads"]:::rule
+    S2["«skip_preseq»"]:::key --> R2["no preseq_lcextrap"]:::rule
+    S3["«skip_picard_metrics»"]:::key --> R3["no CollectMultipleMetrics"]:::rule
+    S4["«skip_spp»"]:::key --> R4["no phantompeakqualtools"]:::rule
+    S5["«skip_plot_profile»"]:::key --> R5["no computeMatrix / plotProfile / plotHeatmap"]:::rule
+    S6["«skip_plot_fingerprint»"]:::key --> R6["no plotFingerprint"]:::rule
+    S7["«skip_peak_annotation»"]:::key --> R7["no HOMER (per-sample and consensus)"]:::rule
+    S8["«skip_peak_qc»"]:::key --> R8["no MACS3 / HOMER summary plots"]:::rule
+    S9["«skip_igv»"]:::key --> R9["no IGV session (FASTA not copied to genome/)"]:::rule
+    S10["«skip_multiqc»"]:::key --> R10["no MultiQC"]:::rule
+    K1["«save_reference»"]:::key --> U1["genome/ and genome/index/ in outdir"]:::rule
+    K2["«save_trimmed»"]:::key --> U2["trimmed FASTQ in outdir/trimgalore/"]:::rule
+    K3["«save_align_intermeds»"]:::key --> U3["library BAMs, merged, mkD and flT BAMs in outdir"]:::rule
+    K4["«save_unaligned»"]:::key --> U4["unmapped reads in «aligner»/library/unmapped/"]:::rule
+```
+
+---
+
+## 4. Config key reference
+
+| Key | Rule(s) | Effect on the command |
+|---|---|---|
+| `input` | samplesheet_check, all per-library rules | Samplesheet; `control` defines IP/control pairs and `antibody` groups the consensus analysis. |
+| `outdir` / `workdir` | all | Published files / intermediates. |
+| `fasta`, `gtf`, `gff`, `gene_bed` | reference rules | Genome and annotation; `.gz` unzipped; GFF → GTF via `gffread «args.gffread»`. |
+| `blacklist` | genome_blacklist_regions | Regions removed with `samtools view -L include_regions.bed`. |
+| `bwa_index`, `bowtie2_index`, `chromap_index`, `star_index` | index rules | Use a pre-built index (dir or `.tar.gz`; chromap needs the `.index` file). |
+| `save_reference` | reference rules | Publish `genome/` and `genome/index/`. |
+| `macs_gsize`, `read_length` | macs3_callpeak, khmer_uniquekmers | Effective genome size, or computed with `unique-kmers.py -k read_length`. |
+| `clip_r1`, `clip_r2`, `three_prime_clip_r1`, `three_prime_clip_r2`, `trim_nextseq` | trimgalore_* | Added as `--clip_r1` etc. when > 0; R2 options are dropped for single-end. |
+| `skip_trimming`, `save_trimmed`, `min_trimmed_reads` | trimgalore_*, trim_summary | Trimming on/off, publish trimmed reads, drop libraries below the read count. |
+| `aligner` | alignment + index rules | `bwa` / `bowtie2` / `chromap` / `star`; also the output root `outdir/<aligner>/`. |
+| `seq_center` | bowtie2_align, star_align, read groups | `CN:` in the read group. |
+| `bwa_min_score` | bwa_mem | `bwa mem -T`. |
+| `save_unaligned` | bowtie2_align, star_align | Write unmapped reads. |
+| `save_align_intermeds` | sort / merge / markdup / filter rules | Publish intermediate BAMs and their stats. |
+| `keep_dups` | bamtools_filter_* | `false` → `-F 0x0400` removes duplicates. |
+| `keep_multi_map` | bamtools_filter_* | `false` → `-q 1` removes multimappers. |
+| `bamtools_filter_pe_config`, `bamtools_filter_se_config` | bamtools_filter_* | JSON rule script for `bamtools filter -script`. |
+| `fragment_size` | bedtools_genomecov, deeptools_plotfingerprint | Single-end read extension (`-fs`, `--extendReads`). |
+| `fingerprint_bins` | deeptools_plotfingerprint | `--numberOfSamples`. |
+| `narrow_peak`, `broad_cutoff` | macs3_callpeak, macs3_consensus, file names | Narrow vs broad mode; consensus merge columns follow. |
+| `macs_fdr`, `macs_pvalue` | macs3_callpeak | `--qvalue` / `--pvalue`. |
+| `save_macs_pileup` | macs3_callpeak | `--bdg --SPMR`. |
+| `min_reps_consensus` | macs3_consensus | `--min_replicates` for keeping a consensus peak. |
+| `skip_peak_qc`, `skip_peak_annotation`, `skip_consensus_peaks` | plot_*, homer_*, consensus rules | Turn those steps off. |
+| `deseq2_vst`, `skip_deseq2_qc` | deseq2_qc | `--vst TRUE` / turn off. |
+| `skip_qc`, `skip_fastqc`, `skip_picard_metrics`, `skip_preseq`, `skip_plot_profile`, `skip_plot_fingerprint`, `skip_spp`, `skip_igv`, `skip_multiqc` | QC rules, igv, multiqc | Turn each step off (`skip_qc` covers FastQC). |
+| `multiqc_config`, `multiqc_title` | multiqc | Extra `--config`, `--title`. `multiqc_logo` is accepted but ignored, as in nf-core. |
+| `args.*` | the rule named by each key | Fixed tool argument strings from nf-core `conf/modules.config` (e.g. `args.macs3` = `--keep-dup all`). Edit them to change the default command. |
+| `resources.<label>` | every rule | `threads`/`mem_mb`; memory also sets Picard `-Xmx`, FastQC `--memory`, STAR `--limitGenomeGenerateRAM`. |
+
+---
+
+## 5. Exact rule graph
+
+To regenerate the real rule DAG for a config (no jobs are run), from inside `snk-chipseq/`:
+
+```bash
+snakemake --configfile config/test.yaml --rulegraph mermaid-js > rulegraph.mmd
+```
+
+Rules after the `trim_summary` and `peak_summary` checkpoints only appear once those
+checkpoints have run.

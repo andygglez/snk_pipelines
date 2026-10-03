@@ -1,0 +1,974 @@
+# =============================================================================
+# snk-hic — Snakemake port of nf-core/hic 2.1.0
+#
+# Every rule mirrors one nf-core process (named in the comment above each rule)
+# and runs inside the same Singularity image the nf-core module uses
+# (see config/containers.yaml). Custom tools from nf-core/hic bin/ live in
+# scripts/.
+#
+# Run:  snakemake --cores N --sdm apptainer
+# =============================================================================
+
+import csv
+import glob
+import os
+from collections import OrderedDict
+
+configfile: "config/config.yaml"
+configfile: "config/containers.yaml"
+
+SCRIPTS = os.path.join(workflow.basedir, "scripts")
+O = config["outdir"].rstrip("/")
+
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def container_path(key):
+    path = config["containers"][key]
+    return path if os.path.isabs(path) else os.path.join(workflow.basedir, path)
+
+
+def res(label):
+    return config["resources"][label]
+
+
+def maybe_temp(path, keep):
+    return path if keep else temp(path)
+
+
+def as_list(value):
+    if value is None or value == "":
+        return []
+    if isinstance(value, (list, tuple)):
+        return [int(v) for v in value]
+    return [int(v) for v in str(value).split(",")]
+
+
+def is_url(path):
+    return str(path).startswith(("http://", "https://", "ftp://"))
+
+
+# Remote inputs (FASTQ / FASTA URLs) are staged into {O}/inputs/ by fetch_remote,
+# the equivalent of Nextflow's automatic staging of remote files.
+REMOTE = {}
+
+
+def stage(path):
+    if not is_url(path):
+        return path
+    local = f"{O}/inputs/{os.path.basename(path)}"
+    REMOTE[os.path.basename(path)] = path
+    return local
+
+
+# -----------------------------------------------------------------------------
+# Parameters (WorkflowHic.initialise / workflows/hic.nf)
+# -----------------------------------------------------------------------------
+DNASE = bool(config["dnase"])
+if config["digestion"]:
+    RESTRICTION_SITE = config["digest"][config["digestion"]]["restriction_site"]
+    LIGATION_SITE = config["digest"][config["digestion"]]["ligation_site"]
+elif config["restriction_site"] and config["ligation_site"]:
+    RESTRICTION_SITE = config["restriction_site"]
+    LIGATION_SITE = config["ligation_site"]
+elif DNASE:
+    RESTRICTION_SITE = LIGATION_SITE = None
+else:
+    raise ValueError(
+        "Ligation motif not found. Set `digestion`, or both `restriction_site` and "
+        "`ligation_site`. For DNase Hi-C, set `dnase: true`."
+    )
+
+if not config["fasta"]:
+    raise ValueError("`fasta` is required.")
+FASTA = stage(config["fasta"])
+
+RES_DIST_DECAY = [] if config["skip_dist_decay"] else as_list(config["res_dist_decay"])
+RES_TADS = [] if config["skip_tads"] else as_list(config["res_tads"])
+RES_COMPARTMENTS = [] if config["skip_compartments"] else as_list(config["res_compartments"])
+MAP_RES = sorted(set(
+    as_list(config["bin_size"]) + as_list(config["res_zoomify"])
+    + RES_TADS + RES_DIST_DECAY + RES_COMPARTMENTS
+))
+# nf-core zoomifies every res_zoomify value into the same <sample>.mcool;
+# here the finest one is used as the base resolution (see COOLER subworkflow).
+ZOOMIFY_RES = min(as_list(config["res_zoomify"]) or MAP_RES)
+TADS_CALLER = config["tads_caller"]
+if isinstance(TADS_CALLER, str):
+    TADS_CALLER = TADS_CALLER.split(",")
+
+# -----------------------------------------------------------------------------
+# Samplesheet (INPUT_CHECK). Rows sharing a sample name are separate chunks.
+# -----------------------------------------------------------------------------
+SAMPLES = OrderedDict()
+with open(config["input"], newline="") as fh:
+    for row in csv.DictReader(fh):
+        sample = row["sample"].replace(" ", "_")
+        SAMPLES.setdefault(sample, []).append(
+            (stage(row["fastq_1"]), stage(row["fastq_2"]))
+        )
+
+wildcard_constraints:
+    sample="[^/]+",
+    chunk=r"\d+",
+    lane=r"\d+",
+    mate="R[12]",
+    res=r"\d+",
+
+
+def chunk_pairs(sample):
+    """Ordered list of (R1, R2) FASTQ chunks for a sample."""
+    pairs = []
+    for lane, (r1, r2) in enumerate(SAMPLES[sample]):
+        if config["split_fastq"]:
+            outdir = checkpoints.split_fastq.get(sample=sample, lane=lane).output[0]
+            for part in sorted(glob.glob(f"{outdir}/R1_*.fastq.gz")):
+                pairs.append((part, part.replace("/R1_", "/R2_")))
+        else:
+            pairs.append((r1, r2))
+    return pairs
+
+
+def chunks(sample):
+    return range(len(chunk_pairs(sample)))
+
+
+def chunk_fastq(wc):
+    r1, r2 = chunk_pairs(wc.sample)[int(wc.chunk)]
+    return r1 if wc.mate == "R1" else r2
+
+
+# Genome resources: provided by the user or built by PREPARE_GENOME.
+BWT2_INDEX = config["bwt2_index"] or f"{O}/genome/bowtie2"
+CHROMSIZES = config["chromosome_size"] or f"{O}/genome/{os.path.basename(FASTA)}.sizes"
+RESFRAG = config["restriction_fragments"] or f"{O}/genome/restriction_fragments.bed"
+
+MAPDIR = f"{O}/hicpro/mapping"
+VPDIR = f"{O}/hicpro/valid_pairs"
+STATDIR = f"{O}/hicpro/stats"
+COOLDIR = f"{O}/contact_maps/cool"
+
+
+# -----------------------------------------------------------------------------
+# Targets
+# -----------------------------------------------------------------------------
+def all_outputs(wc):
+    out = [f"{O}/pipeline_info/samplesheet.valid.csv"]
+    for s in SAMPLES:
+        for c in chunks(s):
+            out += expand(f"{O}/fastqc/{s}_{c}_{{r}}_fastqc.{{ext}}", r=[1, 2], ext=["html", "zip"])
+            out.append(f"{MAPDIR}/{s}/{s}_{c}_bwt2pairs.bam")
+        out += [
+            f"{VPDIR}/{s}.allValidPairs",
+            f"{VPDIR}/pairix/{s}_contacts.pairs.gz",
+            f"{VPDIR}/pairix/{s}_contacts.pairs.gz.px2",
+            f"{STATDIR}/{s}/{s}_allValidPairs.mergestat",
+            f"{STATDIR}/{s}/{s}.R1.mmapstat",
+            f"{STATDIR}/{s}/{s}.R2.mmapstat",
+            f"{STATDIR}/{s}/{s}.mpairstat",
+            f"{STATDIR}/{s}/{s}.mRSstat",
+            f"{COOLDIR}/{s}.mcool",
+        ]
+        if config["save_raw_maps"]:
+            out += expand(f"{COOLDIR}/{s}.{{res}}.cool", res=MAP_RES)
+        out += expand(f"{COOLDIR}/{s}.{{res}}_balanced.cool", res=MAP_RES)
+        out += expand(f"{O}/contact_maps/txt/{s}.{{res}}_balanced.txt", res=MAP_RES)
+        if config["save_raw_maps"]:
+            out += expand(f"{O}/contact_maps/txt/{s}.{{res}}_raw.txt", res=MAP_RES)
+        if config["hicpro_maps"]:
+            out += expand(f"{O}/hicpro/matrix/iced/{s}.{{res}}_iced.matrix", res=MAP_RES)
+        out += expand(f"{O}/distance_decay/{s}.{{res}}_distcount.png", res=RES_DIST_DECAY)
+        out += expand(f"{O}/compartments/{s}.{{res}}_compartments.cis.vecs.tsv", res=RES_COMPARTMENTS)
+        if "insulation" in TADS_CALLER:
+            out += expand(f"{O}/tads/insulation/{s}.{{res}}_balanced_insulation.tsv", res=RES_TADS)
+        if "hicexplorer" in TADS_CALLER:
+            out += expand(f"{O}/tads/hicExplorer/{s}.{{res}}_balanced_hicfindtads_domains.bed", res=RES_TADS)
+    out += expand(f"{O}/contact_maps/bins/cooler_bins_{{res}}.bed", res=MAP_RES)
+    if not config["skip_multiqc"]:
+        out.append(f"{O}/multiqc/multiqc_report.html")
+    return out
+
+
+rule all:
+    input:
+        all_outputs,
+
+
+# =============================================================================
+# Input staging
+# =============================================================================
+
+# Not an nf-core process: Nextflow stages remote inputs itself.
+rule fetch_remote:
+    output:
+        f"{O}/inputs/{{fname}}",
+    params:
+        url=lambda wc: REMOTE[wc.fname],
+    retries: 2
+    run:
+        import shutil
+        import urllib.request
+
+        with urllib.request.urlopen(params.url) as src, open(output[0], "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
+# SAMPLESHEET_CHECK
+rule samplesheet_check:
+    input:
+        config["input"],
+    output:
+        f"{O}/pipeline_info/samplesheet.valid.csv",
+    container:
+        container_path("python")
+    threads: res("single")["threads"]
+    resources:
+        mem_mb=res("single")["mem_mb"],
+    shell:
+        "python {SCRIPTS}/check_samplesheet.py {input} {output}"
+
+
+# splitFastq (INPUT_CHECK, split_fastq: true): fastq_chunks_size reads per chunk.
+checkpoint split_fastq:
+    input:
+        r1=lambda wc: SAMPLES[wc.sample][int(wc.lane)][0],
+        r2=lambda wc: SAMPLES[wc.sample][int(wc.lane)][1],
+    output:
+        directory(f"{O}/split_fastq/{{sample}}/lane{{lane}}"),
+    params:
+        lines=4 * int(config["fastq_chunks_size"]),
+    container:
+        container_path("ubuntu")
+    threads: res("low")["threads"]
+    resources:
+        mem_mb=res("low")["mem_mb"],
+    shell:
+        """
+        mkdir -p {output}
+        zcat {input.r1} | split -l {params.lines} -d -a 5 --additional-suffix=.fastq \
+            --filter='gzip > $FILE.gz' - {output}/R1_
+        zcat {input.r2} | split -l {params.lines} -d -a 5 --additional-suffix=.fastq \
+            --filter='gzip > $FILE.gz' - {output}/R2_
+        """
+
+
+# =============================================================================
+# PREPARE_GENOME
+# =============================================================================
+
+# BOWTIE2_BUILD
+rule bowtie2_build:
+    input:
+        FASTA,
+    output:
+        maybe_temp(directory(f"{O}/genome/bowtie2"), config["save_reference"]),
+    params:
+        prefix=lambda wc, input: os.path.splitext(os.path.basename(input[0]))[0],
+    container:
+        container_path("bowtie2")
+    threads: res("single")["threads"]
+    resources:
+        mem_mb=res("single")["mem_mb"],
+    log:
+        f"{O}/logs/bowtie2_build.log",
+    shell:
+        """
+        mkdir -p {output}
+        bowtie2-build --threads {threads} {input} {output}/{params.prefix} > {log} 2>&1
+        """
+
+
+# CUSTOM_GETCHROMSIZES
+rule getchromsizes:
+    input:
+        FASTA,
+    output:
+        sizes=maybe_temp(f"{O}/genome/{os.path.basename(FASTA)}.sizes", config["save_reference"]),
+        fai=maybe_temp(f"{O}/genome/{os.path.basename(FASTA)}.fai", config["save_reference"]),
+    container:
+        container_path("samtools_chromsizes")
+    threads: res("single")["threads"]
+    resources:
+        mem_mb=res("single")["mem_mb"],
+    shell:
+        """
+        samtools faidx --fai-idx {output.fai} {input}
+        cut -f 1,2 {output.fai} > {output.sizes}
+        """
+
+
+# GET_RESTRICTION_FRAGMENTS
+rule get_restriction_fragments:
+    input:
+        FASTA,
+    output:
+        maybe_temp(f"{O}/genome/restriction_fragments.bed", config["save_reference"]),
+    params:
+        site=RESTRICTION_SITE,
+    container:
+        container_path("hicpro_python")
+    threads: res("low")["threads"]
+    resources:
+        mem_mb=res("low")["mem_mb"],
+    shell:
+        "python {SCRIPTS}/digest_genome.py -r '{params.site}' -o {output} {input}"
+
+
+# =============================================================================
+# QC
+# =============================================================================
+
+# FASTQC (files are named <sample>_<chunk>_{1,2} so chunks do not overwrite each other)
+rule fastqc:
+    input:
+        r1=lambda wc: chunk_pairs(wc.sample)[int(wc.chunk)][0],
+        r2=lambda wc: chunk_pairs(wc.sample)[int(wc.chunk)][1],
+    output:
+        html1=f"{O}/fastqc/{{sample}}_{{chunk}}_1_fastqc.html",
+        zip1=f"{O}/fastqc/{{sample}}_{{chunk}}_1_fastqc.zip",
+        html2=f"{O}/fastqc/{{sample}}_{{chunk}}_2_fastqc.html",
+        zip2=f"{O}/fastqc/{{sample}}_{{chunk}}_2_fastqc.zip",
+    container:
+        container_path("fastqc")
+    threads: res("medium")["threads"]
+    resources:
+        mem_mb=res("medium")["mem_mb"],
+    log:
+        f"{O}/logs/fastqc/{{sample}}_{{chunk}}.log",
+    shell:
+        """
+        tmp=$(mktemp -d)
+        ln -s $(realpath {input.r1}) $tmp/{wildcards.sample}_{wildcards.chunk}_1.fastq.gz
+        ln -s $(realpath {input.r2}) $tmp/{wildcards.sample}_{wildcards.chunk}_2.fastq.gz
+        fastqc --threads {threads} -o $(dirname {output.html1}) \
+            $tmp/{wildcards.sample}_{wildcards.chunk}_1.fastq.gz \
+            $tmp/{wildcards.sample}_{wildcards.chunk}_2.fastq.gz > {log} 2>&1
+        rm -rf $tmp
+        """
+
+
+# =============================================================================
+# HICPRO_MAPPING
+# =============================================================================
+
+# BOWTIE2_ALIGN — end-to-end alignment of each mate as single-end reads
+rule bowtie2_align:
+    input:
+        fq=chunk_fastq,
+        index=BWT2_INDEX,
+        samplesheet=f"{O}/pipeline_info/samplesheet.valid.csv",
+    output:
+        bam=maybe_temp(f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.bam", config["save_aligned_intermediates"]),
+        unmapped=maybe_temp(f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.unmapped.fastq.gz", config["save_aligned_intermediates"]),
+    log:
+        f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.bowtie2.log",
+    params:
+        args=config["bwt2_opts_end2end"],
+        args2="" if DNASE else "-F 4",
+    container:
+        container_path("bowtie2_samtools")
+    threads: res("high")["threads"]
+    resources:
+        mem_mb=res("high")["mem_mb"],
+    shell:
+        """
+        INDEX=$(find -L {input.index} -name "*.rev.1.bt2" | sed "s/\\.rev.1.bt2$//")
+        [ -z "$INDEX" ] && INDEX=$(find -L {input.index} -name "*.rev.1.bt2l" | sed "s/\\.rev.1.bt2l$//")
+        [ -z "$INDEX" ] && echo "Bowtie2 index files not found" 1>&2 && exit 1
+
+        bowtie2 -x $INDEX -U {input.fq} --threads {threads} \
+            --un-gz {output.unmapped} {params.args} 2> {log} \
+            | samtools view {params.args2} --threads {threads} -o {output.bam} -
+        """
+
+
+if not DNASE:
+
+    # TRIM_READS — trim unmapped reads at the ligation junction
+    rule trim_reads:
+        input:
+            f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.unmapped.fastq.gz",
+        output:
+            maybe_temp(f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.fastq.gz", config["save_aligned_intermediates"]),
+        params:
+            motif=LIGATION_SITE,
+            tmp=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.tmp.fastq",
+            out=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.fastq",
+        container:
+            container_path("ubuntu")
+        threads: res("low")["threads"]
+        resources:
+            mem_mb=res("low")["mem_mb"],
+        shell:
+            """
+            zcat {input} > {params.tmp}
+            {SCRIPTS}/cutsite_trimming --fastq {params.tmp} \
+                --cutsite {params.motif} \
+                --out {params.out}
+            gzip -f {params.out}
+            rm -f {params.tmp}
+            """
+
+    # BOWTIE2_ALIGN_TRIMMED — re-align the trimmed reads
+    rule bowtie2_align_trimmed:
+        input:
+            fq=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.fastq.gz",
+            index=BWT2_INDEX,
+        output:
+            bam=maybe_temp(f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.bam", config["save_aligned_intermediates"]),
+        log:
+            f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.bowtie2.log",
+        params:
+            args=config["bwt2_opts_trimmed"],
+        container:
+            container_path("bowtie2_samtools")
+        threads: res("high")["threads"]
+        resources:
+            mem_mb=res("high")["mem_mb"],
+        shell:
+            """
+            INDEX=$(find -L {input.index} -name "*.rev.1.bt2" | sed "s/\\.rev.1.bt2$//")
+            [ -z "$INDEX" ] && INDEX=$(find -L {input.index} -name "*.rev.1.bt2l" | sed "s/\\.rev.1.bt2l$//")
+            [ -z "$INDEX" ] && echo "Bowtie2 index files not found" 1>&2 && exit 1
+
+            bowtie2 -x $INDEX -U {input.fq} --threads {threads} {params.args} 2> {log} \
+                | samtools view --threads {threads} -o {output.bam} -
+            """
+
+    # MERGE_BOWTIE2 — merge end-to-end + trimmed alignments, name-sort, mapping stats
+    rule merge_bowtie2:
+        input:
+            bam1=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.bam",
+            bam2=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.bam",
+        output:
+            bam=maybe_temp(f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_bwt2merged.bam", config["save_aligned_intermediates"]),
+            stats=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.mapstat",
+        params:
+            prefix="{sample}_{chunk}_{mate}",
+            unsorted=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_bwt2merged.unsorted.bam",
+            sort_mem=config["samtools_sort_mem"],
+        container:
+            container_path("samtools")
+        threads: res("medium")["threads"]
+        resources:
+            mem_mb=res("medium")["mem_mb"],
+        shell:
+            """
+            samtools merge -@ {threads} -f {params.unsorted} {input.bam1} {input.bam2}
+            samtools sort -@ {threads} -m {params.sort_mem} -n -o {output.bam} {params.unsorted}
+            rm -f {params.unsorted}
+
+            echo "## {params.prefix}" > {output.stats}
+            echo -n "total_{wildcards.mate}\t" >> {output.stats}
+            samtools view -c {output.bam} >> {output.stats}
+            echo -n "mapped_{wildcards.mate}\t" >> {output.stats}
+            samtools view -c -F 4 {output.bam} >> {output.stats}
+            echo -n "global_{wildcards.mate}\t" >> {output.stats}
+            samtools view -c -F 4 {input.bam1} >> {output.stats}
+            echo -n "local_{wildcards.mate}\t" >> {output.stats}
+            samtools view -c -F 4 {input.bam2} >> {output.stats}
+            """
+
+else:
+
+    # MAPPING_STATS_DNASE
+    rule mapping_stats_dnase:
+        input:
+            f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.bam",
+        output:
+            stats=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.mapstat",
+        params:
+            prefix="{sample}_{chunk}_{mate}",
+        container:
+            container_path("samtools")
+        threads: res("medium")["threads"]
+        resources:
+            mem_mb=res("medium")["mem_mb"],
+        shell:
+            """
+            echo "## {params.prefix}" > {output.stats}
+            echo -n "total_{wildcards.mate}\t" >> {output.stats}
+            samtools view -c {input} >> {output.stats}
+            echo -n "mapped_{wildcards.mate}\t" >> {output.stats}
+            samtools view -c -F 4 {input} >> {output.stats}
+            echo -n "global_{wildcards.mate}\t" >> {output.stats}
+            samtools view -c -F 4 {input} >> {output.stats}
+            echo -n "local_{wildcards.mate}\t0" >> {output.stats}
+            """
+
+
+def mate_bam(mate):
+    suffix = "" if DNASE else "_bwt2merged"
+    return f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{mate}{suffix}.bam"
+
+
+# COMBINE_MATES — pair R1/R2 alignments, MAPQ filtering, pairing stats
+rule combine_mates:
+    input:
+        r1=mate_bam("R1"),
+        r2=mate_bam("R2"),
+    output:
+        bam=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.bam",
+        stats=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.pairstat",
+    params:
+        args=" ".join(filter(None, [
+            "-t",
+            "--multi" if config["keep_multi"] else "",
+            f"-q {config['min_mapq']}" if config["min_mapq"] else "",
+        ])),
+    container:
+        container_path("hicpro_python")
+    threads: res("low")["threads"]
+    resources:
+        mem_mb=res("low")["mem_mb"],
+    shell:
+        "python {SCRIPTS}/mergeSAM.py -f {input.r1} -r {input.r2} -o {output.bam} {params.args}"
+
+
+# =============================================================================
+# HICPRO — valid interactions, stats, pairs, optional HiC-Pro maps
+# =============================================================================
+
+if not DNASE:
+
+    # GET_VALID_INTERACTION
+    rule get_valid_interaction:
+        input:
+            bam=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.bam",
+            resfrag=RESFRAG,
+        output:
+            valid=maybe_temp(f"{VPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.validPairs", config["save_pairs_intermediates"]),
+            stats=f"{VPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.RSstat",
+            other=[
+                maybe_temp(f"{VPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.{ext}", config["save_pairs_intermediates"])
+                for ext in ["DEPairs", "SCPairs", "REPairs", "FiltPairs", "DumpPairs", "SinglePairs"]
+            ],
+        params:
+            outdir=f"{VPDIR}/{{sample}}",
+            args=" ".join(filter(None, [
+                f"-d {config['min_cis_dist']}" if config["min_cis_dist"] > 0 else "",
+                f"-s {config['min_insert_size']}" if config["min_insert_size"] > 0 else "",
+                f"-l {config['max_insert_size']}" if config["max_insert_size"] > 0 else "",
+                f"-t {config['min_restriction_fragment_size']}" if config["min_restriction_fragment_size"] > 0 else "",
+                f"-m {config['max_restriction_fragment_size']}" if config["max_restriction_fragment_size"] > 0 else "",
+                "--sam" if config["save_interaction_bam"] else "",
+            ])),
+        container:
+            container_path("hicpro_python")
+        threads: res("low")["threads"]
+        resources:
+            mem_mb=res("low")["mem_mb"],
+        shell:
+            """
+            python {SCRIPTS}/mapped_2hic_fragments.py \
+                -f {input.resfrag} -r {input.bam} --all {params.args} -o {params.outdir}
+            """
+
+else:
+
+    # GET_VALID_INTERACTION_DNASE
+    rule get_valid_interaction_dnase:
+        input:
+            bam=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.bam",
+        output:
+            valid=maybe_temp(f"{VPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.validPairs", config["save_pairs_intermediates"]),
+            stats=f"{VPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.RSstat",
+        params:
+            outdir=f"{VPDIR}/{{sample}}",
+            args=f"-d {config['min_cis_dist']}" if config["min_cis_dist"] > 0 else "",
+        container:
+            container_path("hicpro_python")
+        threads: res("low")["threads"]
+        resources:
+            mem_mb=res("low")["mem_mb"],
+        shell:
+            """
+            python {SCRIPTS}/mapped_2hic_dnase.py -r {input.bam} {params.args} -o {params.outdir}
+            """
+
+
+# MERGE_VALID_INTERACTION — merge chunks, remove duplicates, merge stats
+rule merge_valid_interaction:
+    input:
+        lambda wc: [f"{VPDIR}/{wc.sample}/{wc.sample}_{c}_bwt2pairs.validPairs" for c in chunks(wc.sample)],
+    output:
+        valid=f"{VPDIR}/{{sample}}.allValidPairs",
+        stats=f"{STATDIR}/{{sample}}/{{sample}}_allValidPairs.mergestat",
+    params:
+        workdir=f"{VPDIR}/{{sample}}",
+        args="" if config["keep_dups"] else "-d",
+    container:
+        container_path("ubuntu")
+    threads: res("high_memory")["threads"]
+    resources:
+        mem_mb=res("high_memory")["mem_mb"],
+    shell:
+        """
+        out_valid=$(realpath {output.valid})
+        out_stats=$(realpath {output.stats})
+        files=$(for f in {input}; do basename $f; done)
+        cd {params.workdir}
+        bash {SCRIPTS}/hicpro_merge_validpairs.sh {params.args} -p {wildcards.sample} $files
+        mv {wildcards.sample}.allValidPairs $out_valid
+        mv {wildcards.sample}_allValidPairs.mergestat $out_stats
+        """
+
+
+# MERGE_STATS (mapping stats, one per mate)
+rule merge_mapstats:
+    input:
+        lambda wc: [f"{MAPDIR}/{wc.sample}/{wc.sample}_{c}_{wc.mate}.mapstat" for c in chunks(wc.sample)],
+    output:
+        f"{STATDIR}/{{sample}}/{{sample}}.{{mate}}.mmapstat",
+    container:
+        container_path("hicpro_python")
+    threads: res("low")["threads"]
+    resources:
+        mem_mb=res("low")["mem_mb"],
+    shell:
+        "python {SCRIPTS}/merge_statfiles.py -f {input} > {output}"
+
+
+# MERGE_STATS (pairing stats)
+rule merge_pairstats:
+    input:
+        lambda wc: [f"{MAPDIR}/{wc.sample}/{wc.sample}_{c}_bwt2pairs.pairstat" for c in chunks(wc.sample)],
+    output:
+        f"{STATDIR}/{{sample}}/{{sample}}.mpairstat",
+    container:
+        container_path("hicpro_python")
+    threads: res("low")["threads"]
+    resources:
+        mem_mb=res("low")["mem_mb"],
+    shell:
+        "python {SCRIPTS}/merge_statfiles.py -f {input} > {output}"
+
+
+# MERGE_STATS (valid-interaction stats)
+rule merge_rsstats:
+    input:
+        lambda wc: [f"{VPDIR}/{wc.sample}/{wc.sample}_{c}_bwt2pairs.RSstat" for c in chunks(wc.sample)],
+    output:
+        f"{STATDIR}/{{sample}}/{{sample}}.mRSstat",
+    container:
+        container_path("hicpro_python")
+    threads: res("low")["threads"]
+    resources:
+        mem_mb=res("low")["mem_mb"],
+    shell:
+        "python {SCRIPTS}/merge_statfiles.py -f {input} > {output}"
+
+
+# HICPRO2PAIRS — allValidPairs -> 4DN pairs (bgzip + pairix index)
+rule hicpro2pairs:
+    input:
+        f"{VPDIR}/{{sample}}.allValidPairs",
+    output:
+        pairs=f"{VPDIR}/pairix/{{sample}}_contacts.pairs.gz",
+        index=f"{VPDIR}/pairix/{{sample}}_contacts.pairs.gz.px2",
+    container:
+        container_path("pairix")
+    threads: res("medium")["threads"]
+    resources:
+        mem_mb=res("medium")["mem_mb"],
+    shell:
+        """
+        awk '{{OFS="\\t";print $1,$2,$3,$5,$6,$4,$7}}' {input} | bgzip -c > {output.pairs}
+        pairix -f {output.pairs}
+        """
+
+
+# BUILD_CONTACT_MAPS (hicpro_maps: true)
+rule build_contact_maps:
+    input:
+        pairs=f"{VPDIR}/{{sample}}.allValidPairs",
+        chromsizes=CHROMSIZES,
+    output:
+        matrix=f"{O}/hicpro/matrix/raw/{{sample}}.{{res}}.matrix",
+        abs_bed=f"{O}/hicpro/matrix/raw/{{sample}}.{{res}}_abs.bed",
+        ord_bed=f"{O}/hicpro/matrix/raw/{{sample}}.{{res}}_ord.bed",
+    params:
+        prefix=f"{O}/hicpro/matrix/raw/{{sample}}.{{res}}",
+    container:
+        container_path("ubuntu")
+    threads: res("high_memory")["threads"]
+    resources:
+        mem_mb=res("high_memory")["mem_mb"],
+    shell:
+        """
+        {SCRIPTS}/build_matrix \
+            --matrix-format upper \
+            --binsize {wildcards.res} \
+            --chrsizes {input.chromsizes} \
+            --ifile {input.pairs} \
+            --oprefix {params.prefix}
+        """
+
+
+# ICE_NORMALIZATION (hicpro_maps: true)
+rule ice_normalization:
+    input:
+        f"{O}/hicpro/matrix/raw/{{sample}}.{{res}}.matrix",
+    output:
+        matrix=f"{O}/hicpro/matrix/iced/{{sample}}.{{res}}_iced.matrix",
+        biases=f"{O}/hicpro/matrix/iced/{{sample}}.{{res}}_iced.matrix.biases",
+    params:
+        low=config["ice_filter_low_count_perc"],
+        high=config["ice_filter_high_count_perc"],
+        max_iter=config["ice_max_iter"],
+        eps=config["ice_eps"],
+    container:
+        container_path("hicpro_python")
+    threads: res("high_memory")["threads"]
+    resources:
+        mem_mb=res("high_memory")["mem_mb"],
+    shell:
+        """
+        ice --filter_low_counts_perc {params.low} \
+            --results_filename {output.matrix} \
+            --filter_high_counts_perc {params.high} \
+            --max_iter {params.max_iter} --eps {params.eps} \
+            --remove-all-zeros-loci --output-bias 1 --verbose 1 {input}
+        """
+
+
+# =============================================================================
+# COOLER
+# =============================================================================
+
+# COOLER_MAKEBINS
+rule cooler_makebins:
+    input:
+        CHROMSIZES,
+    output:
+        f"{O}/contact_maps/bins/cooler_bins_{{res}}.bed",
+    container:
+        container_path("cooler")
+    threads: res("single")["threads"]
+    resources:
+        mem_mb=res("single")["mem_mb"],
+    shell:
+        "cooler makebins {input} {wildcards.res} > {output}"
+
+
+# COOLER_CLOAD
+rule cooler_cload:
+    input:
+        pairs=f"{VPDIR}/pairix/{{sample}}_contacts.pairs.gz",
+        index=f"{VPDIR}/pairix/{{sample}}_contacts.pairs.gz.px2",
+        chromsizes=CHROMSIZES,
+    output:
+        maybe_temp(f"{COOLDIR}/{{sample}}.{{res}}.cool", config["save_raw_maps"]),
+    params:
+        args=config["cooler_cload_args"],
+        nproc=lambda wc, threads: f"--nproc {threads}"
+        if ("pairix" in config["cooler_cload_args"] or "tabix" in config["cooler_cload_args"]) else "",
+    container:
+        container_path("cooler")
+    threads: res("single")["threads"]
+    resources:
+        mem_mb=res("single")["mem_mb"],
+    shell:
+        "cooler cload {params.args} {params.nproc} {input.chromsizes}:{wildcards.res} {input.pairs} {output}"
+
+
+# COOLER_BALANCE
+rule cooler_balance:
+    input:
+        f"{COOLDIR}/{{sample}}.{{res}}.cool",
+    output:
+        f"{COOLDIR}/{{sample}}.{{res}}_balanced.cool",
+    params:
+        args=config["cooler_balance_args"],
+    container:
+        container_path("cooler")
+    threads: res("single")["threads"]
+    resources:
+        mem_mb=res("single")["mem_mb"],
+    shell:
+        """
+        cp {input} {output}
+        cooler balance {params.args} -p {threads} {output}
+        """
+
+
+# COOLER_ZOOMIFY (from the raw, unbalanced cool at the base resolution)
+rule cooler_zoomify:
+    input:
+        f"{COOLDIR}/{{sample}}.{ZOOMIFY_RES}.cool",
+    output:
+        f"{COOLDIR}/{{sample}}.mcool",
+    params:
+        args=config["cooler_zoomify_args"],
+    container:
+        container_path("cooler")
+    threads: res("single")["threads"]
+    resources:
+        mem_mb=res("single")["mem_mb"],
+    shell:
+        "cooler zoomify {params.args} -n {threads} -o {output} {input}"
+
+
+# COOLER_DUMP
+rule cooler_dump:
+    input:
+        f"{COOLDIR}/{{sample}}.{{res}}_balanced.cool",
+    output:
+        temp(f"{O}/contact_maps/txt/{{sample}}.{{res}}_balanced.bedpe"),
+    params:
+        args=config["cooler_dump_args"],
+    container:
+        container_path("cooler")
+    threads: res("single")["threads"]
+    resources:
+        mem_mb=res("single")["mem_mb"],
+    shell:
+        "cooler dump {params.args} -o {output} {input}"
+
+
+# SPLIT_COOLER_DUMP
+rule split_cooler_dump:
+    input:
+        f"{O}/contact_maps/txt/{{sample}}.{{res}}_balanced.bedpe",
+    output:
+        raw=maybe_temp(f"{O}/contact_maps/txt/{{sample}}.{{res}}_raw.txt", config["save_raw_maps"]),
+        balanced=f"{O}/contact_maps/txt/{{sample}}.{{res}}_balanced.txt",
+    container:
+        container_path("ubuntu")
+    threads: res("low")["threads"]
+    resources:
+        mem_mb=res("low")["mem_mb"],
+    shell:
+        """
+        cat {input} | awk '{{OFS="\\t"; print $1,$2,$3}}' > {output.raw}
+        cat {input} | awk '{{OFS="\\t"; print $1,$2,$4}}' > {output.balanced}
+        """
+
+
+# =============================================================================
+# Downstream analysis
+# =============================================================================
+
+# HIC_PLOT_DIST_VS_COUNTS (named <sample>.<res> so several resolutions do not collide)
+rule hic_plot_dist_vs_counts:
+    input:
+        f"{COOLDIR}/{{sample}}.{{res}}_balanced.cool",
+    output:
+        png=f"{O}/distance_decay/{{sample}}.{{res}}_distcount.png",
+        txt=f"{O}/distance_decay/{{sample}}.{{res}}_distcount.txt",
+    container:
+        container_path("hicexplorer")
+    threads: res("medium")["threads"]
+    resources:
+        mem_mb=res("medium")["mem_mb"],
+    shell:
+        "hicPlotDistVsCounts --matrices {input} --plotFile {output.png} --outFileData {output.txt}"
+
+
+# COOLTOOLS_EIGSCIS (COMPARTMENTS)
+# As in nf-core/hic 2.1.0, the GC track is computed but not passed to eigs-cis.
+rule cooltools_eigscis:
+    input:
+        cool=f"{COOLDIR}/{{sample}}.{{res}}_balanced.cool",
+        fasta=FASTA,
+        chromsizes=CHROMSIZES,
+    output:
+        vecs=f"{O}/compartments/{{sample}}.{{res}}_compartments.cis.vecs.tsv",
+        lam=f"{O}/compartments/{{sample}}.{{res}}_compartments.cis.lam.txt",
+        bw=f"{O}/compartments/{{sample}}.{{res}}_compartments.cis.bw",
+        bins=temp(f"{O}/compartments/{{sample}}.{{res}}.genome_bins.txt"),
+        gc=temp(f"{O}/compartments/{{sample}}.{{res}}.genome_gc.txt"),
+    params:
+        args=config["cooltools_eigscis_args"],
+        prefix=f"{O}/compartments/{{sample}}.{{res}}_compartments",
+    container:
+        container_path("cooltools_eigs")
+    threads: res("medium")["threads"]
+    resources:
+        mem_mb=res("medium")["mem_mb"],
+    shell:
+        """
+        cooltools genome binnify --all-names {input.chromsizes} {wildcards.res} > {output.bins}
+        cooltools genome gc {output.bins} {input.fasta} > {output.gc}
+        cooltools eigs-cis {params.args} -o {params.prefix} {input.cool}
+        """
+
+
+# COOLTOOLS_INSULATION (TADS)
+rule cooltools_insulation:
+    input:
+        f"{COOLDIR}/{{sample}}.{{res}}_balanced.cool",
+    output:
+        f"{O}/tads/insulation/{{sample}}.{{res}}_balanced_insulation.tsv",
+    params:
+        args=config["cooltools_insulation_args"],
+    container:
+        container_path("cooltools")
+    threads: res("medium")["threads"]
+    resources:
+        mem_mb=res("medium")["mem_mb"],
+    shell:
+        "cooltools insulation {input} {params.args} > {output}"
+
+
+# HIC_FIND_TADS (TADS)
+rule hic_find_tads:
+    input:
+        f"{COOLDIR}/{{sample}}.{{res}}_balanced.cool",
+    output:
+        domains=f"{O}/tads/hicExplorer/{{sample}}.{{res}}_balanced_hicfindtads_domains.bed",
+        boundaries=f"{O}/tads/hicExplorer/{{sample}}.{{res}}_balanced_hicfindtads_boundaries.bed",
+        score=f"{O}/tads/hicExplorer/{{sample}}.{{res}}_balanced_hicfindtads_score.bedgraph",
+    params:
+        args=config["hicfindtads_args"],
+        prefix=f"{O}/tads/hicExplorer/{{sample}}.{{res}}_balanced_hicfindtads",
+    container:
+        container_path("hicexplorer")
+    threads: res("medium")["threads"]
+    resources:
+        mem_mb=res("medium")["mem_mb"],
+    shell:
+        """
+        hicFindTADs --matrix {input} \
+            --outPrefix {params.prefix} \
+            {params.args} \
+            --numberOfProcessors {threads}
+        """
+
+
+# =============================================================================
+# MULTIQC
+# =============================================================================
+rule multiqc:
+    input:
+        fastqc=lambda wc: [
+            f"{O}/fastqc/{s}_{c}_{r}_fastqc.zip" for s in SAMPLES for c in chunks(s) for r in (1, 2)
+        ],
+        stats=lambda wc: [
+            f
+            for s in SAMPLES
+            for f in (
+                f"{STATDIR}/{s}/{s}_allValidPairs.mergestat",
+                f"{STATDIR}/{s}/{s}.R1.mmapstat",
+                f"{STATDIR}/{s}/{s}.R2.mmapstat",
+                f"{STATDIR}/{s}/{s}.mpairstat",
+                f"{STATDIR}/{s}/{s}.mRSstat",
+            )
+        ],
+        config=config["multiqc_config"],
+    output:
+        f"{O}/multiqc/multiqc_report.html",
+        directory(f"{O}/multiqc/multiqc_data"),
+    container:
+        container_path("multiqc")
+    threads: res("medium")["threads"]
+    resources:
+        mem_mb=res("medium")["mem_mb"],
+    log:
+        f"{O}/logs/multiqc.log",
+    shell:
+        """
+        multiqc -f -c {input.config} -o $(dirname {output[0]}) \
+            {O}/fastqc {STATDIR} > {log} 2>&1
+        """

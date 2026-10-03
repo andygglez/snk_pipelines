@@ -1,0 +1,6 @@
+# Scenario I: overlay on config/test_local.yaml (nf-core: nfcore-methylseq/params_I.yaml)
+outdir: "results_I"
+workdir: "work_I"
+aligner: "bwameth"
+bwameth_index: "/scratch/andygg98/claude_jobs/methylseq_testdata/Bwameth_Index.tar.gz"
+rrbs: true

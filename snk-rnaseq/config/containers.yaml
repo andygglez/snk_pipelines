@@ -1,0 +1,100 @@
+# Singularity images used by each rule. Paths are relative to snk-rnaseq/ (or absolute).
+# Each is the image the matching nf-core/rnaseq 3.27.0 module pins
+# (modules/*/main.nf, https singularity URL), downloaded into containers/.
+containers:
+  # GUNZIP, UNTAR, CAT_FASTQ (coreutils/gzip/tar)
+  coreutils: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-52-52ccce28d2ab928ab862e25aae26314d69c8e38bd41ca9431c67ef05221348aa-data.img
+  # CUSTOM_GTFFILTER
+  gtffilter: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-18-1841daa69f98a0b0ffcb8f545070c8350a75febb167202136eab0990131d31c0-data.img
+  # CUSTOM_CATADDITIONALFASTA
+  catadditionalfasta: containers/depot.galaxyproject.org-singularity-python-3.12.img
+  # EAUTILS_GTF2BED
+  gtf2bed: containers/depot.galaxyproject.org-singularity-perl-5.26.2.img
+  # GFFREAD
+  gffread: containers/depot.galaxyproject.org-singularity-gffread-0.12.7--hdcf5f25_4.img
+  # PREPROCESS_TRANSCRIPTS_FASTA_GENCODE
+  ubuntu: containers/depot.galaxyproject.org-singularity-ubuntu-20.04.img
+  # RSEM_PREPAREREFERENCE (MAKE_TRANSCRIPTS_FASTA; RSEM + STAR)
+  rsem: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-23-23651ffd6a171ef3ba867cb97ef615f6dd6be39158df9466fe92b5e844cd7d59-data.img
+  # SAMTOOLS_FAIDX/SORT/INDEX/STATS/FLAGSTAT/IDXSTATS
+  samtools: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-e9-e994bf4eb3731150511a14f5706b7bdfd64df1b6d40898fff334286c027e0859-data.img
+  # BBMAP_BBSPLIT
+  bbmap: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-5a-5aae5977ff9de3e01ff962dc495bfa23f4304c676446b5fdf2de5c7edfa2dc4e-data.img
+  # STAR_GENOMEGENERATE, STAR_ALIGN
+  star: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-26-268b4c9c6cbf8fa6606c9b7fd4fafce18bf2c931d1a809a0ce51b105ec06c89d-data.img
+  # SALMON_INDEX, SALMON_QUANT
+  salmon: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-1c-1ce42a19f9e7135babf14432e80b33ec717a13f14734d150d53347e979919629-data.img
+  # FQ_LINT, FQ_SUBSAMPLE
+  fq: containers/depot.galaxyproject.org-singularity-fq-0.12.0--h9ee0642_0.img
+  # FASTQC
+  fastqc: containers/depot.galaxyproject.org-singularity-fastqc-0.12.1--hdfd78af_0.img
+  # TRIMGALORE
+  trimgalore: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-e0-e00369598bd6b7b34a7c83d5496c381104bf8b885c31a4b65b92e6ea2059fbb3-data.img
+  # CUSTOM_TX2GENE
+  tx2gene: containers/depot.galaxyproject.org-singularity-python-3.10.4.img
+  # TXIMETA_TXIMPORT
+  tximport: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-bd-bdba33f8ad1b2df156f8f6775279fb217ce0f8233a3dc637337245de9ad2f29f-data.img
+  # SUMMARIZEDEXPERIMENT (SE_GENE_UNIFIED, SE_TRANSCRIPT_UNIFIED)
+  summarizedexperiment: containers/depot.galaxyproject.org-singularity-bioconductor-summarizedexperiment-1.32.0--r43hdfd78af_0.img
+  # DESEQ2_QC
+  deseq2: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-1d-1d425b12748ce54c44c01a535a1ef5867a6e16cbf62c43151012e893444b1673-data.img
+  # PICARD_MARKDUPLICATES
+  picard: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-b4-b474c6f12c0502377b95062b75ef4b7778864b1353c7fc1d5a3b1f3b3017fd2e-data.img
+  # STRINGTIE_STRINGTIE
+  stringtie: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-3f-3facd74a0f728c9bb9e9a731b58c343895d2dbdfeb812ce5747f701103fc61cf-data.img
+  # SUBREAD_FEATURECOUNTS
+  subread: containers/depot.galaxyproject.org-singularity-subread-2.1.1--h577a1d6_0.img
+  # CUSTOM_MULTIQCCUSTOMBIOTYPE
+  biotype: containers/depot.galaxyproject.org-singularity-python-3.12.12.img
+  # PRESEQ_LCEXTRAP
+  preseq: containers/depot.galaxyproject.org-singularity-preseq-3.2.0--hdcf5f25_6.img
+  # QUALIMAP_RNASEQ
+  qualimap: containers/depot.galaxyproject.org-singularity-qualimap-2.3--hdfd78af_0.img
+  # DUPRADAR
+  dupradar: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-24-24bb76357588d05b5637e2954f2dfb3ba04e3eb1ff52c927ffe1906d7d69915a-data.img
+  # RSEQC_* (bam_stat, infer_experiment, inner_distance, junction_annotation,
+  # junction_saturation, read_distribution, read_duplication, tin)
+  rseqc: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-6f-6f44b7933e2c2b1a340dc9485869974eb032d34e81af83716eb381964ee3e5e7-data.img
+  # BEDTOOLS_GENOMECOV
+  bedtools: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-63-6397750e9730a3fbcc5b4c43f14bd141c64c723fd7dad80e47921a68a7c3cd21-data.img
+  # UCSC_BEDCLIP
+  bedclip: containers/depot.galaxyproject.org-singularity-ucsc-bedclip-482--h0b57e2e_0.img
+  # UCSC_BEDGRAPHTOBIGWIG
+  bedgraphtobigwig: containers/depot.galaxyproject.org-singularity-ucsc-bedgraphtobigwig-482--hdc0a859_0.img
+  # MULTIQC (also runs scripts/multiqc_rnaseq_inputs.py: python3 + pyyaml)
+  multiqc: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-c8-c8e346f4f6080eadf1253505e6ff09ef004454fc18e8d672006fd7b222cc412e-data.img
+
+# Where each image above comes from (the URL the nf-core module pins).
+# `pipeline pull <name>` downloads any missing image from here; it has no
+# effect on runs. Compute nodes are offline, so pull on a login node first.
+container_urls:
+  coreutils: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/52/52ccce28d2ab928ab862e25aae26314d69c8e38bd41ca9431c67ef05221348aa/data
+  gtffilter: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/18/1841daa69f98a0b0ffcb8f545070c8350a75febb167202136eab0990131d31c0/data
+  catadditionalfasta: https://depot.galaxyproject.org/singularity/python:3.12
+  gtf2bed: https://depot.galaxyproject.org/singularity/perl:5.26.2
+  gffread: https://depot.galaxyproject.org/singularity/gffread:0.12.7--hdcf5f25_4
+  ubuntu: https://depot.galaxyproject.org/singularity/ubuntu:20.04
+  rsem: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/23/23651ffd6a171ef3ba867cb97ef615f6dd6be39158df9466fe92b5e844cd7d59/data
+  samtools: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/e9/e994bf4eb3731150511a14f5706b7bdfd64df1b6d40898fff334286c027e0859/data
+  bbmap: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/5a/5aae5977ff9de3e01ff962dc495bfa23f4304c676446b5fdf2de5c7edfa2dc4e/data
+  star: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/26/268b4c9c6cbf8fa6606c9b7fd4fafce18bf2c931d1a809a0ce51b105ec06c89d/data
+  salmon: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/1c/1ce42a19f9e7135babf14432e80b33ec717a13f14734d150d53347e979919629/data
+  fq: https://depot.galaxyproject.org/singularity/fq:0.12.0--h9ee0642_0
+  fastqc: https://depot.galaxyproject.org/singularity/fastqc:0.12.1--hdfd78af_0
+  trimgalore: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/e0/e00369598bd6b7b34a7c83d5496c381104bf8b885c31a4b65b92e6ea2059fbb3/data
+  tx2gene: https://depot.galaxyproject.org/singularity/python:3.10.4
+  tximport: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/bd/bdba33f8ad1b2df156f8f6775279fb217ce0f8233a3dc637337245de9ad2f29f/data
+  summarizedexperiment: https://depot.galaxyproject.org/singularity/bioconductor-summarizedexperiment:1.32.0--r43hdfd78af_0
+  deseq2: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/1d/1d425b12748ce54c44c01a535a1ef5867a6e16cbf62c43151012e893444b1673/data
+  picard: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/b4/b474c6f12c0502377b95062b75ef4b7778864b1353c7fc1d5a3b1f3b3017fd2e/data
+  stringtie: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/3f/3facd74a0f728c9bb9e9a731b58c343895d2dbdfeb812ce5747f701103fc61cf/data
+  subread: https://depot.galaxyproject.org/singularity/subread:2.1.1--h577a1d6_0
+  biotype: https://depot.galaxyproject.org/singularity/python:3.12.12
+  preseq: https://depot.galaxyproject.org/singularity/preseq:3.2.0--hdcf5f25_6
+  qualimap: https://depot.galaxyproject.org/singularity/qualimap:2.3--hdfd78af_0
+  dupradar: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/24/24bb76357588d05b5637e2954f2dfb3ba04e3eb1ff52c927ffe1906d7d69915a/data
+  rseqc: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/6f/6f44b7933e2c2b1a340dc9485869974eb032d34e81af83716eb381964ee3e5e7/data
+  bedtools: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/63/6397750e9730a3fbcc5b4c43f14bd141c64c723fd7dad80e47921a68a7c3cd21/data
+  bedclip: https://depot.galaxyproject.org/singularity/ucsc-bedclip:482--h0b57e2e_0
+  bedgraphtobigwig: https://depot.galaxyproject.org/singularity/ucsc-bedgraphtobigwig:482--hdc0a859_0
+  multiqc: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/c8/c8e346f4f6080eadf1253505e6ff09ef004454fc18e8d672006fd7b222cc412e/data

@@ -1,0 +1,8 @@
+# Rorqual extra test C (overlay on test_local.yaml): GFF annotation, .tar.gz bwa index, multi-run replicate,
+# library below min_trimmed_reads (tiny), single-replicate antibody (SOLO), likely-empty peaks (EMPTY)
+input: "config/samplesheet_edge_local.csv"
+outdir: "results_C"
+workdir: "work_C"
+gtf: ""
+gff: "/scratch/andygg98/claude_jobs/chipseq_testdata/genes.gff"
+bwa_index: "/scratch/andygg98/claude_jobs/chipseq_testdata/bwa_index.tar.gz"

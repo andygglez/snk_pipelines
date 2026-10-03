@@ -1,0 +1,7 @@
+# Scenario B: overlay on config/test_local.yaml (nf-core: nfcore-methylseq/params_B.yaml)
+outdir: "results_B"
+workdir: "work_B"
+aligner: "bwamem"
+taps: true
+save_reference: true
+save_align_intermeds: true

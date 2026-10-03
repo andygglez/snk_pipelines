@@ -1,0 +1,123 @@
+# =============================================================================
+# snk-methylseq — Snakemake port of nf-core/methylseq
+# Reference implementation: nf-core/methylseq 4.2.0 (../nfcore-methylseq/4_2_0)
+# Defaults below mirror nextflow.config / conf/modules/*.config of that release.
+# Container paths live in config/containers.yaml.
+# =============================================================================
+
+# ---- Input / output ---------------------------------------------------------
+# CSV with header: sample,fastq_1,fastq_2,genome (assets/schema_input.json).
+# Rows sharing a sample name are runs of one sample and are concatenated
+# (CAT_FASTQ). Paths may be local or http(s)/ftp URLs.
+input: "config/samplesheet.csv"  ### <path to samplesheet CSV>
+outdir: "results"            ### <directory>
+# Intermediate files that nf-core keeps in its work/ directory. Kept outside
+# outdir so outdir mirrors the nf-core publishDir layout file for file.
+workdir: "work"              ### <directory>
+
+# ---- References -------------------------------------------------------------
+# iGenomes (`genome`) is not ported: give the files explicitly.
+fasta: ""                    ### <path or URL: .fa/.fasta(.gz)>  # Genome FASTA (.gz allowed). Required.
+fasta_index: ""              ### <path or URL: .fa.fai, or "" to build>  # .fai; built with samtools faidx if empty (bwameth, bwamem, collecthsmetrics)
+bismark_index: ""            ### <path or URL: index directory or .tar.gz, or "" to build>  # Bismark index directory or .tar.gz; built if empty (bismark, bismark_hisat)
+bwameth_index: ""            ### <path or URL: index directory or .tar.gz, or "" to build>  # bwa-meth index directory or .tar.gz; built if empty
+bwamem_index: ""             ### <path or URL: index directory or .tar.gz, or "" to build>  # bwa index directory or .tar.gz; built if empty
+save_reference: false        ### [true, false]  # Publish built indices under <outdir>/<aligner>/reference_genome
+
+# ---- Alignment --------------------------------------------------------------
+aligner: "bismark"           ### ["bismark", "bismark_hisat", "bwameth", "bwamem"]
+use_mem2: false              ### [true, false]  # bwameth: build a bwa-mem2 index (index-mem2)
+save_align_intermeds: false  ### [true, false]
+unmapped: false              ### [true, false]  # bismark --unmapped
+save_trimmed: false          ### [true, false]
+
+# ---- Library presets --------------------------------------------------------
+taps: false                  ### [true, false]
+pbat: false                  ### [true, false]
+rrbs: false                  ### [true, false]
+slamseq: false               ### [true, false]
+em_seq: false                ### [true, false]
+single_cell: false           ### [true, false]
+accel: false                 ### [true, false]
+zymo: false                  ### [true, false]
+
+# ---- Trimming (Trim Galore) ---------------------------------------------------
+clip_r1: 0                   ### <integer (0 = none)>
+clip_r2: 0                   ### <integer (0 = none)>
+three_prime_clip_r1: 0       ### <integer (0 = none)>
+three_prime_clip_r2: 0       ### <integer (0 = none)>
+nextseq_trim: 0              ### <integer (0 = off)>
+length_trim: ""              ### <integer, or "" for the Trim Galore default>  # --length; empty = Trim Galore default
+skip_trimming_presets: false ### [true, false]
+# rastair call trims (RASTAIR_CALL ext.args). nf-core 4.2.0 builds ext.args
+# from these but the module never uses it: --nOT/--nOB come from
+# RASTAIR_MBIASPARSER. Kept for completeness.
+trim_OT: "0,0,10,0"          ### <string "r1_start,r1_end,r2_start,r2_end">
+trim_OB: "0,0,10,0"          ### <string "r1_start,r1_end,r2_start,r2_end">
+
+# ---- Bismark ----------------------------------------------------------------
+non_directional: false       ### [true, false]
+cytosine_report: false       ### [true, false]
+relax_mismatches: false      ### [true, false]
+num_mismatches: 0.6          ### <number>
+meth_cutoff: ""              ### <integer, or "" for none>
+no_overlap: true             ### [true, false]
+ignore_r1: 0                 ### <integer>
+ignore_r2: 2                 ### <integer>
+ignore_3prime_r1: 0          ### <integer>
+ignore_3prime_r2: 2          ### <integer>
+known_splices: ""            ### <path: .gtf(.gz), or "">  # bismark_hisat: splice-site file for hisat2_extract_splice_sites.py
+local_alignment: false       ### [true, false]
+minins: ""                   ### <integer, or "" for the Bismark default>
+maxins: ""                   ### <integer, or "" for the Bismark default>
+nomeseq: false               ### [true, false]
+comprehensive: false         ### [true, false]
+
+# ---- bwa-meth / MethylDackel ------------------------------------------------
+all_contexts: false          ### [true, false]
+merge_context: false         ### [true, false]
+min_depth: 0                 ### <integer (0 = off)>
+ignore_flags: false          ### [true, false]
+methyl_kit: false            ### [true, false]
+
+# ---- Skipping / optional steps ----------------------------------------------
+skip_trimming: false         ### [true, false]
+skip_deduplication: false    ### [true, false]
+skip_fastqc: false           ### [true, false]
+skip_multiqc: false          ### [true, false]
+run_preseq: false            ### [true, false]
+run_qualimap: false          ### [true, false]
+run_targeted_sequencing: false  ### [true, false]
+bamqc_regions_file: ""       ### <path or URL: .gff/.bed(.gz), or "">  # Qualimap --gff
+target_regions_file: ""      ### <path or URL: .bed(.gz), or "">  # BED of targets (run_targeted_sequencing)
+collecthsmetrics: false      ### [true, false]
+
+# ---- MultiQC ----------------------------------------------------------------
+multiqc_config: ""           ### <path to YAML, or "">  # Extra MultiQC config (--config)
+multiqc_title: ""            ### <string, or "">
+multiqc_logo: ""             ### <path to image, or "">
+
+# ---- Fixed module arguments (conf/modules/*.config ext.args) -----------------
+args:
+  fastqc: "--quiet"          ### <string: tool arguments>
+  bismark_deduplicate: ""    ### <string: tool arguments>
+  bismark_report: ""         ### <string: tool arguments>
+  bismark_summary: ""        ### <string: tool arguments>
+  picard_markduplicates: "--ASSUME_SORTED true --REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT --PROGRAM_RECORD_ID 'null' --TMP_DIR tmp"  ### <string: tool arguments>
+  picard_addorreplacereadgroups: "--RGID 1 --RGLB lib1 --RGPL illumina --RGPU unit1 --RGSM sample1"  ### <string: tool arguments>
+  picard_createsequencedictionary: ""  ### <string: tool arguments>
+  picard_bedtointervallist: ""  ### <string: tool arguments>
+  preseq_lcextrap: " -verbose -bam"  ### <string: tool arguments>
+  bedtools_intersect: ""     ### <string: tool arguments>
+  bwameth_align: ""          ### <string: tool arguments>
+  bwa_mem: ""                ### <string: tool arguments>
+
+# ---- Resources (conf/base.config labels) ------------------------------------
+# threads / mem_mb per nf-core process label. Some values reach the outputs
+# (samtools/bwa @PG lines, picard -Xmx), so keep them equal to the nf-core run
+# you compare against.
+resources:
+  process_single: {threads: 1, mem_mb: 6144}  ### {threads: <integer>, mem_mb: <integer>}
+  process_low:    {threads: 2, mem_mb: 12288}  ### {threads: <integer>, mem_mb: <integer>}
+  process_medium: {threads: 6, mem_mb: 36864}  ### {threads: <integer>, mem_mb: <integer>}
+  process_high:   {threads: 12, mem_mb: 73728}  ### {threads: <integer>, mem_mb: <integer>}

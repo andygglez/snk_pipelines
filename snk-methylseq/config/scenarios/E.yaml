@@ -1,0 +1,7 @@
+# Scenario E: overlay on config/test_local.yaml (nf-core: nfcore-methylseq/params_E.yaml)
+outdir: "results_E"
+workdir: "work_E"
+rrbs: true
+em_seq: true
+clip_r1: 2
+comprehensive: true

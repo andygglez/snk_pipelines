@@ -1,0 +1,15 @@
+# Minimal test profile — mirrors nf-core/methylseq 4.2.0 conf/test.config.
+# Usage: snakemake --cores 4 --sdm apptainer --configfile config/test.yaml
+input: "config/samplesheet.csv"
+outdir: "results_test"
+workdir: "work_test"
+
+fasta: "https://raw.githubusercontent.com/nf-core/test-datasets/methylseq/reference/genome.fa.gz"
+fasta_index: "https://raw.githubusercontent.com/nf-core/test-datasets/methylseq/reference/genome.fa.fai"
+
+# test profile: resourceLimits cpus 4, memory 15.GB
+resources:
+  process_single: {threads: 1, mem_mb: 6144}
+  process_low:    {threads: 2, mem_mb: 12288}
+  process_medium: {threads: 4, mem_mb: 15360}
+  process_high:   {threads: 4, mem_mb: 15360}

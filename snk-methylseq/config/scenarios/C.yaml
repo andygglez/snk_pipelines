@@ -1,0 +1,6 @@
+# Scenario C: overlay on config/test_local.yaml (nf-core: nfcore-methylseq/params_C.yaml)
+outdir: "results_C"
+workdir: "work_C"
+aligner: "bismark_hisat"
+cytosine_report: true
+unmapped: true

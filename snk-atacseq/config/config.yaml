@@ -1,0 +1,131 @@
+# =============================================================================
+# snk-atacseq — Snakemake port of nf-core/atacseq
+# Reference implementation: nf-core/atacseq 2.1.2 (../nfcore-atacseq/2_1_2)
+# Defaults below mirror nextflow.config / conf/modules.config of that release.
+# Container paths live in config/containers.yaml.
+# =============================================================================
+
+# ---- Input / output ---------------------------------------------------------
+# CSV with header: sample,fastq_1,fastq_2,replicate
+# (+ control,control_replicate when with_control is true), validated by
+# scripts/check_samplesheet.py as SAMPLESHEET_CHECK does.
+# Paths may be local or http(s)/ftp URLs.
+input: "config/samplesheet.csv"  ### <path to samplesheet CSV>
+outdir: "results"            ### <directory>
+# Intermediate files that nf-core keeps in its work/ directory. Kept outside
+# outdir so outdir mirrors the nf-core publishDir layout file for file.
+workdir: "work"              ### <directory>
+with_control: false          ### [true, false]  # samplesheet has control columns; peaks are called vs controls
+seq_center: ""               ### <string, or "">
+fragment_size: 200           ### <integer>
+fingerprint_bins: 500000     ### <integer>
+read_length: ""              ### [50, 75, 100, 150, 200, ""]  # required when macs_gsize is empty
+
+# ---- References -------------------------------------------------------------
+# iGenomes (`genome`) is not ported: give the files explicitly.
+fasta: ""                    ### <path or URL: .fa/.fasta(.gz)>  # Genome FASTA (.gz allowed). Required.
+gtf: ""                      ### <path or URL: .gtf(.gz), or "" if gff is set>  # GTF (.gz allowed). Either gtf or gff is required.
+gff: ""                      ### <path or URL: .gff/.gff3(.gz), or "">  # GFF3, converted to GTF with gffread if gtf is empty
+gene_bed: ""                 ### <path or URL: .bed(.gz), or "">  # BED of genes; built from the GTF (gtf2bed) if empty
+tss_bed: ""                  ### <path or URL: .bed(.gz), or "">  # BED of TSSs; built from gene_bed (TSS_EXTRACT) if empty
+blacklist: ""                ### <path or URL: .bed(.gz), or "">  # BED of regions to exclude (e.g. assets/blacklists/...)
+mito_name: ""                ### <chromosome name, or "">  # Mitochondrial chromosome name (removed unless keep_mito)
+ataqv_mito_reference: ""     ### <chromosome name, or "" for mito_name>  # ataqv --mitochondrial-reference-name; defaults to mito_name
+macs_gsize: ""               ### <integer, or "" to compute from read_length>  # Effective genome size; computed with khmer from read_length if empty
+bwa_index: ""                ### <path or URL: index directory or .tar.gz, or "" to build>  # Index directory or .tar.gz; built if empty
+bowtie2_index: ""            ### <path or URL: index directory or .tar.gz, or "" to build>
+chromap_index: ""            ### <path or URL: chromap .index file (not .tar.gz), or "" to build>  # Index file (.tar.gz not ported, see Snakefile)
+star_index: ""               ### <path or URL: index directory or .tar.gz, or "" to build>
+save_reference: false        ### [true, false]  # Publish genome/ and genome/index/ under outdir
+
+# ---- Trimming ---------------------------------------------------------------
+clip_r1: ""                  ### <integer, or "" for none>
+clip_r2: ""                  ### <integer, or "" for none>
+three_prime_clip_r1: ""      ### <integer, or "" for none>
+three_prime_clip_r2: ""      ### <integer, or "" for none>
+trim_nextseq: ""             ### <integer (quality cutoff), or "" for none>
+skip_trimming: false         ### [true, false]
+save_trimmed: false          ### [true, false]
+min_trimmed_reads: 10000     ### <integer>
+
+# ---- Alignment --------------------------------------------------------------
+aligner: "bwa"               ### ["bwa", "bowtie2", "chromap", "star"]
+bwa_min_score: ""            ### <integer, or "" for the bwa default>
+keep_mito: false             ### [true, false]
+keep_dups: false             ### [true, false]
+keep_multi_map: false        ### [true, false]
+skip_merge_replicates: false ### [true, false]
+save_align_intermeds: false  ### [true, false]
+save_unaligned: false        ### [true, false]
+bamtools_filter_pe_config: "assets/bamtools_filter_pe.json"  ### <path to JSON>
+bamtools_filter_se_config: "assets/bamtools_filter_se.json"  ### <path to JSON>
+
+# ---- Peak calling -----------------------------------------------------------
+narrow_peak: false           ### [true, false]
+broad_cutoff: 0.1            ### <number>
+macs_fdr: ""                 ### <number, or "" for none>
+macs_pvalue: ""              ### <number, or "" for none>
+min_reps_consensus: 1        ### <integer>
+save_macs_pileup: false      ### [true, false]
+skip_peak_qc: false          ### [true, false]
+skip_peak_annotation: false  ### [true, false]
+skip_consensus_peaks: false  ### [true, false]
+
+# ---- Differential analysis / QC ---------------------------------------------
+deseq2_vst: true             ### [true, false]
+skip_deseq2_qc: false        ### [true, false]
+skip_qc: false               ### [true, false]
+skip_fastqc: false           ### [true, false]
+skip_picard_metrics: false   ### [true, false]
+skip_preseq: true            ### [true, false]
+skip_plot_profile: false     ### [true, false]
+skip_plot_fingerprint: false ### [true, false]
+skip_ataqv: false            ### [true, false]
+skip_igv: false              ### [true, false]
+skip_multiqc: false          ### [true, false]
+
+# ---- MultiQC ----------------------------------------------------------------
+multiqc_config: ""           ### <path to YAML, or "">  # extra user config, passed with --config
+multiqc_title: ""            ### <string, or "">
+multiqc_logo: ""             ### <path to image, or "">  # accepted for parity; nf-core's local MULTIQC module ignores it
+
+# ---- Fixed tool arguments (conf/modules.config ext.args) --------------------
+# Arguments that depend on params (e.g. BAMTOOLS_FILTER flags, MACS2 --broad)
+# are assembled in the Snakefile from the params above.
+args:
+  fastqc: "--quiet"          ### <string: tool arguments>
+  trimgalore: "--fastqc"     ### <string: tool arguments>
+  bwa_mem: "-M"              ### <string: tool arguments>
+  bwa_mem_samtools: "-bhS -F 0x0100 -O BAM"  ### <string: tool arguments>
+  chromap: "-l 2000 --Tn5-shift --low-mem --SAM"  ### <string: tool arguments>
+  star_align: "--runMode alignReads --alignIntronMax 1 --alignEndsType EndToEnd --outSAMtype BAM Unsorted --readFilesCommand zcat --runRNGseed 0 --outSAMattributes NH HI AS NM MD"  ### <string: tool arguments>
+  gffread: "--keep-exon-attrs -F -T"  ### <string: tool arguments>
+  untar: "--no-same-owner"   ### <string: tool arguments>
+  picard_mergesamfiles: "--SORT_ORDER coordinate --VALIDATION_STRINGENCY LENIENT --TMP_DIR tmp"  ### <string: tool arguments>
+  picard_markduplicates_library: "--ASSUME_SORTED true --REMOVE_DUPLICATES false --VALIDATION_STRINGENCY LENIENT --TMP_DIR tmp"  ### <string: tool arguments>
+  picard_markduplicates_replicate: "--ASSUME_SORTED true --REMOVE_DUPLICATES true --VALIDATION_STRINGENCY LENIENT --TMP_DIR tmp"  ### <string: tool arguments>
+  picard_collectmultiplemetrics: "--VALIDATION_STRINGENCY LENIENT --TMP_DIR tmp"  ### <string: tool arguments>
+  filter_name_sort: "-n"     ### <string: tool arguments>
+  bam_remove_orphans: "--only_fr_pairs"  ### <string: tool arguments>
+  preseq: "-verbose -bam -seed 1"  ### <string: tool arguments>
+  computematrix_scale_regions: "scale-regions --regionBodyLength 1000 --beforeRegionStartLength 3000 --afterRegionStartLength 3000 --missingDataAsZero --skipZeros --smartLabels"  ### <string: tool arguments>
+  computematrix_reference_point: "reference-point --missingDataAsZero --skipZeros --smartLabels --upstream 3000 --downstream 3000"  ### <string: tool arguments>
+  plotfingerprint: "--skipZeros"  ### <string: tool arguments>
+  macs2: "--keep-dup all --nomodel"  ### <string: tool arguments>
+  frip: "-bed -c -f 0.20"    ### <string: tool arguments>
+  homer_annotatepeaks: "-gid"  ### <string: tool arguments>
+  plot_macs2_qc: "-o ./"     ### <string: tool arguments>
+  plot_homer_annotatepeaks: "-o ./"  ### <string: tool arguments>
+  featurecounts: "-F SAF -O --fracOverlap 0.2"  ### <string: tool arguments>
+  deseq2_qc: "--id_col 1 --sample_suffix '.mLb.clN.sorted.bam' --count_col 7"  ### <string: tool arguments>
+  ataqv: "--ignore-read-groups"  ### <string: tool arguments>
+
+# ---- Resources --------------------------------------------------------------
+# conf/base.config labels (attempt 1). mem_mb is also what memory-aware tools
+# (Picard -Xmx, STAR genomeGenerate) are told to use.
+resources:
+  process_default: {threads: 1,  mem_mb: 6144}  ### {threads: <integer>, mem_mb: <integer>}
+  process_single:  {threads: 1,  mem_mb: 6144}  ### {threads: <integer>, mem_mb: <integer>}
+  process_low:     {threads: 2,  mem_mb: 12288}  ### {threads: <integer>, mem_mb: <integer>}
+  process_medium:  {threads: 6,  mem_mb: 36864}  ### {threads: <integer>, mem_mb: <integer>}
+  process_high:    {threads: 12, mem_mb: 73728}  ### {threads: <integer>, mem_mb: <integer>}

@@ -1,0 +1,22 @@
+# Minimal test profile — mirrors nf-core/hic conf/test.config (Schalbetter et al. 2017, yeast).
+# Usage: snakemake --cores 4 --sdm apptainer --configfile config/test.yaml
+input: "config/samplesheet.csv"
+outdir: "results_test"
+fasta: "https://github.com/nf-core/test-datasets/raw/hic/reference/W303_SGD_2015_JRIU00000000.fsa"
+digestion: "hindiii"
+min_mapq: 10
+min_restriction_fragment_size: 100
+max_restriction_fragment_size: 100000
+min_insert_size: 100
+max_insert_size: 600
+bin_size: [2000, 1000]
+res_dist_decay: [1000]
+res_tads: [1000]
+tads_caller: [insulation, hicexplorer]
+res_compartments: [2000]
+resources:
+  single: {threads: 1, mem_mb: 4000}
+  low:    {threads: 2, mem_mb: 4000}
+  medium: {threads: 2, mem_mb: 4000}
+  high:   {threads: 2, mem_mb: 4000}
+  high_memory: {threads: 1, mem_mb: 4000}

@@ -1,0 +1,11 @@
+# Rorqual extra test A (overlay on test_local.yaml): bowtie2, narrow peaks, preseq, all save_* options
+outdir: "results_A"
+workdir: "work_A"
+aligner: "bowtie2"
+narrow_peak: true
+skip_preseq: true   # preseq fails on the small INPUT libraries in nf-core too ("max count before zero ...")
+save_reference: true
+save_trimmed: true
+save_align_intermeds: true
+save_unaligned: true
+save_macs_pileup: true

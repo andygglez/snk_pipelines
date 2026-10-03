@@ -1,0 +1,52 @@
+# Singularity images used by each rule. Paths are relative to snk-hic/ (or absolute).
+# Images are the ones nf-core/hic 2.1.0 pins, downloaded from
+# https://depot.galaxyproject.org/singularity/ into containers/.
+containers:
+  # SAMPLESHEET_CHECK
+  python: containers/depot.galaxyproject.org-singularity-python-3.8.3.img
+  # BOWTIE2_BUILD
+  bowtie2: containers/depot.galaxyproject.org-singularity-bowtie2-2.4.4--py39hbb4e92a_0.img
+  # BOWTIE2_ALIGN, BOWTIE2_ALIGN_TRIMMED (bowtie2 2.4.4 + samtools 1.15.1)
+  bowtie2_samtools: containers/depot.galaxyproject.org-singularity-mulled-v2-ac74a7f02cebcfcc07d8e8d1d750af9c83b4d45a-a0ffedb52808e102887f6ce600d092675bf3528a-0.img
+  # MERGE_BOWTIE2, MAPPING_STATS_DNASE
+  samtools: containers/depot.galaxyproject.org-singularity-samtools-1.15.1--h1170115_0.img
+  # CUSTOM_GETCHROMSIZES
+  samtools_chromsizes: containers/depot.galaxyproject.org-singularity-samtools-1.16.1--h6899075_1.img
+  # GET_RESTRICTION_FRAGMENTS, COMBINE_MATES, GET_VALID_INTERACTION(_DNASE), MERGE_STATS, ICE_NORMALIZATION
+  # (python 3.9 + pysam + bx-python + iced + numpy)
+  hicpro_python: containers/depot.galaxyproject.org-singularity-mulled-v2-c6ff206325681cbb9c9ef890bb8de554172c0483-713df51cd897ceb893b9a6e6420f527d83c2ed95-0.img
+  # TRIM_READS, MERGE_VALID_INTERACTION, BUILD_CONTACT_MAPS, SPLIT_COOLER_DUMP, split_fastq
+  ubuntu: containers/depot.galaxyproject.org-singularity-ubuntu-20.04.img
+  # HICPRO2PAIRS
+  pairix: containers/depot.galaxyproject.org-singularity-pairix-0.3.7--py36h30a8e3e_3.img
+  # COOLER_MAKEBINS, COOLER_CLOAD, COOLER_BALANCE, COOLER_ZOOMIFY, COOLER_DUMP
+  cooler: containers/depot.galaxyproject.org-singularity-cooler-0.8.11--pyh3252c3a_0.img
+  # COOLTOOLS_EIGSCIS (cooltools 0.5.1 + ucsc-bedgraphtobigwig)
+  cooltools_eigs: containers/depot.galaxyproject.org-singularity-mulled-v2-c81d8d6b6acf4714ffaae1a274527a41958443f6-cc7ea58b8cefc76bed985dcfe261cb276ed9e0cf-0.img
+  # COOLTOOLS_INSULATION
+  cooltools: containers/depot.galaxyproject.org-singularity-cooltools-0.5.1--py37h37892f8_0.img
+  # HIC_PLOT_DIST_VS_COUNTS, HIC_FIND_TADS
+  hicexplorer: containers/depot.galaxyproject.org-singularity-hicexplorer-3.7.2--pyhdfd78af_1.img
+  # FASTQC
+  fastqc: containers/depot.galaxyproject.org-singularity-fastqc-0.11.9--0.img
+  # MULTIQC
+  multiqc: containers/depot.galaxyproject.org-singularity-multiqc-1.14--pyhdfd78af_0.img
+
+# Where each image above comes from (the URL the nf-core module pins).
+# `pipeline pull <name>` downloads any missing image from here; it has no
+# effect on runs. Compute nodes are offline, so pull on a login node first.
+container_urls:
+  python: https://depot.galaxyproject.org/singularity/python:3.8.3
+  bowtie2: https://depot.galaxyproject.org/singularity/bowtie2:2.4.4--py39hbb4e92a_0
+  bowtie2_samtools: https://depot.galaxyproject.org/singularity/mulled-v2-ac74a7f02cebcfcc07d8e8d1d750af9c83b4d45a:a0ffedb52808e102887f6ce600d092675bf3528a-0
+  samtools: https://depot.galaxyproject.org/singularity/samtools:1.15.1--h1170115_0
+  samtools_chromsizes: https://depot.galaxyproject.org/singularity/samtools:1.16.1--h6899075_1
+  hicpro_python: https://depot.galaxyproject.org/singularity/mulled-v2-c6ff206325681cbb9c9ef890bb8de554172c0483:713df51cd897ceb893b9a6e6420f527d83c2ed95-0
+  ubuntu: https://depot.galaxyproject.org/singularity/ubuntu:20.04
+  pairix: https://depot.galaxyproject.org/singularity/pairix:0.3.7--py36h30a8e3e_3
+  cooler: https://depot.galaxyproject.org/singularity/cooler:0.8.11--pyh3252c3a_0
+  cooltools_eigs: https://depot.galaxyproject.org/singularity/mulled-v2-c81d8d6b6acf4714ffaae1a274527a41958443f6:cc7ea58b8cefc76bed985dcfe261cb276ed9e0cf-0
+  cooltools: https://depot.galaxyproject.org/singularity/cooltools:0.5.1--py37h37892f8_0
+  hicexplorer: https://depot.galaxyproject.org/singularity/hicexplorer:3.7.2--pyhdfd78af_1
+  fastqc: https://depot.galaxyproject.org/singularity/fastqc:0.11.9--0
+  multiqc: https://depot.galaxyproject.org/singularity/multiqc:1.14--pyhdfd78af_0

@@ -1,0 +1,6 @@
+# Scenario A: overlay on config/test_local.yaml (nf-core: nfcore-methylseq/params_A.yaml)
+outdir: "results_A"
+workdir: "work_A"
+aligner: "bwameth"
+run_qualimap: true
+run_preseq: true

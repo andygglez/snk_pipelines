@@ -1,0 +1,9 @@
+# Rorqual extra test B (overlay on test_local.yaml): single-end, gzipped references, blacklist, pre-built bwa index dir, preseq
+input: "config/samplesheet_se_local.csv"
+outdir: "results_B"
+workdir: "work_B"
+fasta: "/scratch/andygg98/claude_jobs/chipseq_testdata/genome.fa.gz"
+gtf: "/scratch/andygg98/claude_jobs/chipseq_testdata/genes.gtf.gz"
+blacklist: "/scratch/andygg98/claude_jobs/chipseq_testdata/blacklist.bed"
+bwa_index: "/scratch/andygg98/claude_jobs/chipseq_testdata/bwa_index"
+skip_preseq: false
