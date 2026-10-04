@@ -17,11 +17,18 @@ nodes are offline, so `pipeline pull` them on a machine with internet (e.g. a
 Rorqual login node) first. `pipeline run` refuses to start while any image is
 missing.
 
+Binds: `pipeline run` binds the workdir, the port directory, and the
+directory of every local path in the port's reference keys (BIND_KEYS: fasta,
+gtf, indexes, ...) and in the samplesheet's fastq_1/fastq_2 columns, including
+symlink targets. Use -B for anything else, --no-auto-bind to turn this off.
+
 Install: ln -s <repo>/pipeline.py ~/.local/bin/pipeline
 """
 
 import argparse
+import csv
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -45,6 +52,50 @@ NAMES = {
     "hic": "snk-hic",
     "wgbs": "snk-methylseq",
 }
+
+# Config keys whose values are host paths that `pipeline run` binds into the
+# containers automatically (keyed by port directory). Empty values and URLs
+# are skipped. Add a key here when a port gains a new path parameter.
+BIND_KEYS = {
+    "snk-rnaseq": [
+        "fasta", "gtf", "gff", "additional_fasta", "transcript_fasta",
+        "gene_bed", "star_index", "salmon_index", "rsem_index", "hisat2_index",
+        "bowtie2_index", "kallisto_index", "bbsplit_index", "bbsplit_fasta_list",
+        "kraken_db", "splicesites", "ribo_database_manifest", "sortmerna_index",
+        "bowtie2_rrna_index", "multiqc_config", "multiqc_logo",
+    ],
+    "snk-chipseq": [
+        "fasta", "gtf", "gff", "gene_bed", "blacklist", "bwa_index",
+        "bowtie2_index", "chromap_index", "star_index",
+        "bamtools_filter_pe_config", "bamtools_filter_se_config",
+        "multiqc_config", "multiqc_logo",
+    ],
+    "snk-atacseq": [
+        "fasta", "gtf", "gff", "gene_bed", "tss_bed", "blacklist", "bwa_index",
+        "bowtie2_index", "chromap_index", "star_index",
+        "bamtools_filter_pe_config", "bamtools_filter_se_config",
+        "multiqc_config", "multiqc_logo",
+    ],
+    "snk-hic": [
+        "fasta", "bwt2_index", "chromosome_size", "restriction_fragments",
+        "multiqc_config",
+    ],
+    "snk-methylseq": [
+        "fasta", "fasta_index", "bismark_index", "bwameth_index",
+        "bwamem_index", "known_splices", "bamqc_regions_file",
+        "target_regions_file", "multiqc_config", "multiqc_logo",
+    ],
+}
+# Keys (in any port) whose file lists further paths: column 2 of a
+# `name,path` CSV for bbsplit_fasta_list, one path per line otherwise.
+MANIFEST_KEYS = {"bbsplit_fasta_list": 1, "ribo_database_manifest": 0}
+# Samplesheet (config key `input`) columns holding paths.
+SAMPLESHEET_COLUMNS = ["fastq_1", "fastq_2"]
+# Binding these (or, for the first set, anything under them) would hide the
+# container's own system files, so they are never bound automatically.
+SYSTEM_TREES = {"/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64",
+                "/proc", "/sbin", "/sys", "/usr"}
+SYSTEM_DIRS = SYSTEM_TREES | {"/", "/opt", "/root", "/run", "/var"}
 
 
 # -----------------------------------------------------------------------------
@@ -106,6 +157,124 @@ def images(name, user_config=None):
 def missing_images(name, user_config=None):
     return {k: v for k, v in images(name, user_config).items()
             if not os.path.isfile(v[0])}
+
+
+def warn(msg):
+    print(f"pipeline: warning: {msg}", file=sys.stderr)
+
+
+def is_url(value):
+    return re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value) is not None
+
+
+def merged_config(pdir, user_config):
+    """Top-level config as Snakemake sees it: port defaults, then
+    containers.yaml, then the user's file (later files win)."""
+    cfg = {}
+    for path in (os.path.join(pdir, "config", "config.yaml"),
+                 os.path.join(pdir, "config", "containers.yaml"), user_config):
+        cfg.update(load_yaml(path))
+    return cfg
+
+
+def resolve(value, workdir, pdir):
+    """Host path of a config/samplesheet value, the way the Snakefiles resolve
+    it: absolute, else relative to the workdir, else to the port directory
+    (asset_path). None if it exists in neither."""
+    path = os.path.expanduser(value)
+    if os.path.isabs(path):
+        return path if os.path.exists(path) else None
+    for base in (workdir, pdir):
+        cand = os.path.join(base, path)
+        if os.path.exists(cand):
+            return os.path.abspath(cand)
+    return None
+
+
+def read_manifest(path, column):
+    """Paths listed in a manifest file (column `column` of a CSV line)."""
+    out = []
+    with open(path) as fh:
+        for line in fh:
+            fields = [f.strip() for f in line.split(",")]
+            if len(fields) > column and fields[column] and not fields[column].startswith("#"):
+                out.append(fields[column])
+    return out
+
+
+def bind_dirs(path):
+    """Directories to bind so `path` and its siblings (indexes, .fai/.bai)
+    are visible: the directory itself, or a file's parent, plus the same for
+    the resolved target when a symlink is involved."""
+    out = []
+    for p in (os.path.abspath(path), os.path.realpath(path)):
+        out.append(p if os.path.isdir(p) else os.path.dirname(p))
+    return out
+
+
+def collapse(dirs):
+    """Unique directories, dropping any that sit inside another one."""
+    kept = []
+    for d in sorted(set(dirs)):
+        if not any(d == k or d.startswith(k.rstrip("/") + "/") for k in kept):
+            kept.append(d)
+    return kept
+
+
+def auto_binds(name, user_config, workdir):
+    """Host directories referenced by the port's path keys (BIND_KEYS), the
+    files they list (MANIFEST_KEYS) and the samplesheet's FASTQ columns."""
+    pdir = port_dir(name)
+    cfg = merged_config(pdir, user_config)
+    # (where it came from, config key or None, raw value); manifest and
+    # samplesheet entries are appended while the loop runs.
+    values = []
+    for key in BIND_KEYS.get(os.path.basename(pdir), []) + ["input"]:
+        value = cfg.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append((f"config `{key}`", key, value.strip()))
+
+    dirs = []
+    for origin, key, value in values:
+        if is_url(value):
+            continue
+        path = resolve(value, workdir, pdir)
+        if path is None:
+            warn(f"{origin}: {value} not found; not bound")
+            continue
+        dirs += bind_dirs(path)
+        if not os.path.isfile(path):
+            continue
+        if key in MANIFEST_KEYS:
+            values += [(f"`{key}` entry", None, v)
+                       for v in read_manifest(path, MANIFEST_KEYS[key])]
+        elif key == "input":
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh):
+                    for col in SAMPLESHEET_COLUMNS:
+                        cell = (row.get(col) or "").strip()
+                        if cell:
+                            values.append((f"samplesheet `{col}`", None, cell))
+    return dirs
+
+
+def container_binds(name, user_config, workdir, extra, auto=True):
+    """The --bind list for apptainer: the workdir, the port directory
+    (scripts/, assets/), the `-B` extras and, with `auto`, auto_binds()."""
+    dirs = [workdir, port_dir(name)]
+    if auto:
+        dirs += auto_binds(name, user_config, workdir)
+    out = []
+    for d in collapse(dirs):
+        if d in SYSTEM_DIRS or any(d.startswith(s + "/") for s in SYSTEM_TREES):
+            warn(f"{d} is a system directory; not bound (use -B to force)")
+        elif "," in d or ":" in d:
+            warn(f"{d} contains ',' or ':', which --bind cannot express; "
+                 f"not bound")
+        else:
+            out.append(d)
+    # -B paths are taken as given, so a user can still bind what is refused.
+    return collapse(out + [os.path.abspath(b) for b in extra])
 
 
 def find_snakemake(override):
@@ -208,7 +377,9 @@ def cmd_run(args):
         else:
             die(msg)
 
-    binds = [workdir] + [os.path.abspath(b) for b in args.bind]
+    binds = container_binds(args.name, configfile, workdir, args.bind,
+                            auto=not args.no_auto_bind)
+    print("pipeline: binding " + ", ".join(binds), file=sys.stderr)
     cmd = [
         find_snakemake(args.snakemake),
         "--snakefile", os.path.join(pdir, "Snakefile"),
@@ -222,7 +393,7 @@ def cmd_run(args):
         configfile,
         "--cores", str(args.threads),
         "--sdm", "apptainer",
-        "--apptainer-args", "--bind " + ",".join(dict.fromkeys(binds)),
+        "--apptainer-args", "--bind " + ",".join(binds),
     ]
     if args.dry_run:
         cmd.append("--dry-run")
@@ -273,7 +444,12 @@ def main():
                    help="directory to run in (outputs, relative paths) [.]")
     p.add_argument("-B", "--bind", action="append", default=[],
                    help="extra path to bind into the containers (repeatable); "
-                        "the workdir is always bound")
+                        "the workdir, the port directory and the directories "
+                        "of the config's reference paths and samplesheet "
+                        "FASTQs are bound automatically")
+    p.add_argument("--no-auto-bind", action="store_true",
+                   help="bind only the workdir, the port directory and -B "
+                        "paths")
     p.add_argument("-n", "--dry-run", action="store_true")
     p.add_argument("--no-check", action="store_true",
                    help="start even if images are missing")

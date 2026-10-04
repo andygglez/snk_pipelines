@@ -88,7 +88,7 @@ mkdir -p ~/projects/exp1 && cd ~/projects/exp1
 pipeline config rnaseq -p .
 # edit rnaseq.config.yaml (input, outdir, fasta, gtf, ...)
 pipeline run rnaseq -c rnaseq.config.yaml -n
-pipeline run rnaseq -c rnaseq.config.yaml -t 8 -B /data/genomes
+pipeline run rnaseq -c rnaseq.config.yaml -t 8
 ```
 
 **Updating.** After pulling new code (`git pull`), run `uv sync`. The tool
@@ -111,7 +111,7 @@ pipeline pull rnaseq
 # compute node (no internet): no download, no re-resolve
 module load apptainer
 cd /scratch/$USER/exp1
-pipeline run rnaseq -c rnaseq.config.yaml -t $SLURM_CPUS_PER_TASK -B /scratch/$USER
+pipeline run rnaseq -c rnaseq.config.yaml -t $SLURM_CPUS_PER_TASK
 # or, without the tool install:
 uv run --project /scratch/$USER/pipelines --frozen --offline pipeline run ...
 ```
@@ -178,13 +178,13 @@ dpipeline run rnaseq -c rnaseq.config.yaml -t 8
 
 **Data outside the run directory.** Inside Docker, only `/work` and
 `/containers` exist. Mount other folders at the same path they have on the
-host, and also bind them into the Apptainer containers with `-B`:
+host; `pipeline run` then binds them into the Apptainer containers itself:
 
 ```bash
 docker run --rm -it --privileged --user "$(id -u):$(id -g)" \
     -v "$HOME/pipeline-images":/containers -v "$PWD":/work \
     -v /data/genomes:/data/genomes:ro \
-    pipelines run rnaseq -c rnaseq.config.yaml -t 8 -B /data/genomes
+    pipelines run rnaseq -c rnaseq.config.yaml -t 8
 ```
 
 The config can then use `fasta: /data/genomes/GRCh38.fa.gz` unchanged.
@@ -286,7 +286,8 @@ pipeline run rnaseq -c rnaseq.config.yaml -t 12
 | `-c, --configfile` | Your config YAML (required). |
 | `-t, --threads` | Total cores Snakemake may use (`--cores`). Default 1. |
 | `-d, --workdir` | Directory to run in. Default: the current directory. |
-| `-B, --bind` | Extra host path to make visible inside the containers. Repeatable. |
+| `-B, --bind` | Extra host path to make visible inside the containers. Repeatable. Only needed for paths the automatic binds miss (see below). |
+| `--no-auto-bind` | Bind only the run directory, the port directory and `-B` paths. |
 | `-n, --dry-run` | Show the jobs without running anything. |
 | `--no-check` | Start even if some images are missing. |
 | `--snakemake` | Path to the snakemake executable. |
@@ -302,9 +303,25 @@ What `run` does:
 3. **Layers the configs.** It passes, in order, the port's `config.yaml`, its
    `containers.yaml`, then your file. Later files win, so your config only
    needs the keys you want to change.
-4. **Uses Apptainer.** It runs Snakemake with `--sdm apptainer` and binds the
-   run directory, plus every `-B` path, into the containers. Data or references
-   that live outside the run directory must be bound with `-B`.
+4. **Uses Apptainer and binds your data automatically.** It runs Snakemake
+   with `--sdm apptainer` and binds into the containers:
+   - the run directory and the port directory (`scripts/`, `assets/`);
+   - the directory of every local path in the pipeline's reference keys
+     (`fasta`, `gtf`, `gff`, `*_index`, `blacklist`, `multiqc_config`, ...;
+     the list per pipeline is `BIND_KEYS` in `pipeline.py`), and of the files
+     listed in `bbsplit_fasta_list` / `ribo_database_manifest`;
+   - the samplesheet and the directory of every `fastq_1`/`fastq_2` path in it;
+   - for symlinks, the directory of the real file too;
+   - every `-B` path.
+
+   A file binds its parent directory, so sidecars (`.fai`, `.bai`, index
+   files) are visible. Relative paths are resolved from the run directory,
+   then the port directory. URLs and empty values are skipped; paths that do
+   not exist and system directories (`/etc`, `/usr`, ...) are skipped with a
+   warning. Nested directories are merged, and the final list is printed
+   (`pipeline: binding ...`). Use `-B` for any other path a tool needs (for
+   example a path passed through `-- --config`), or `--no-auto-bind` to
+   turn this off.
 
 It prints the full Snakemake command before running it, so the call can be
 reproduced by hand.
@@ -312,7 +329,7 @@ reproduced by hand.
 Examples:
 
 ```bash
-pipeline run chipseq -c chipseq.config.yaml -t 8 -B /scratch/me/genomes
+pipeline run chipseq -c chipseq.config.yaml -t 8 -B /scratch/me/extra
 pipeline run hic -c hic.config.yaml -n                      # dry run
 pipeline run wgbs -c wgbs.config.yaml -t 4 -- --rerun-incomplete --keep-going
 ```
@@ -572,7 +589,7 @@ pipeline pull rnaseq                     # download images once
 # compute node (salloc / sbatch)
 module load apptainer
 cd /scratch/$USER/exp1
-pipeline run rnaseq -c rnaseq.config.yaml -t $SLURM_CPUS_PER_TASK -B /scratch/$USER
+pipeline run rnaseq -c rnaseq.config.yaml -t $SLURM_CPUS_PER_TASK
 ```
 
 An existing Snakemake virtualenv works too: `source <venv>/bin/activate` instead
