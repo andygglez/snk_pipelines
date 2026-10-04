@@ -176,7 +176,10 @@ def cmd_pull(args):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         part = path + ".part"
         try:
-            with urllib.request.urlopen(url, timeout=60) as resp, open(part, "wb") as fh:
+            # community-cr-prod.seqera.io (Cloudflare) answers 403 to urllib's
+            # default "Python-urllib/3.x" User-Agent, so send our own.
+            req = urllib.request.Request(url, headers={"User-Agent": "pipeline/1.0"})
+            with urllib.request.urlopen(req, timeout=60) as resp, open(part, "wb") as fh:
                 shutil.copyfileobj(resp, fh, length=1 << 20)
             os.replace(part, path)
             print(f"    -> {path} ({os.path.getsize(path) / 1e6:.0f} MB)")
