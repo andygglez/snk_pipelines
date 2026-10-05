@@ -1,0 +1,10 @@
+# nf-core tests/umi.nf.test "--umi_dedup_tool 'umitools'" (star_salmon)
+with_umi: true
+umitools_extract_method: regex
+umitools_bc_pattern: "^(?P<umi_1>CGA.{8}){s<=2}.*"
+umitools_dedup_stats: true
+skip_bbsplit: true
+save_umi_intermeds: true
+skip_stringtie: true
+skip_bigwig: true
+skip_pseudo_alignment: true

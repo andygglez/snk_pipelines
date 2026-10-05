@@ -7,7 +7,7 @@ containers:
   python: containers/depot.galaxyproject.org-singularity-python-3.8.3.img
   # GUNZIP_*, UNTAR_*, UNTARFILES
   ubuntu22: containers/depot.galaxyproject.org-singularity-ubuntu-22.04.img
-  # ANNOTATE_BOOLEAN_PEAKS, MULTIQC_CUSTOM_PEAKS
+  # ANNOTATE_BOOLEAN_PEAKS, MULTIQC_CUSTOM_PEAKS, UNTARFILES (chromap .tar.gz index)
   ubuntu20: containers/depot.galaxyproject.org-singularity-ubuntu-20.04.img
   # GFFREAD
   gffread: containers/depot.galaxyproject.org-singularity-gffread-0.12.7--hdcf5f25_4.img

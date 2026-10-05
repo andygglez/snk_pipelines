@@ -1,0 +1,15 @@
+# nf-core tests/prokaryotic.nf.test "--aligner star_salmon --prokaryotic"
+# (use together with config/prokaryotic.yaml)
+input: "config/samplesheet_test_prokaryotic.csv"
+fasta: "https://raw.githubusercontent.com/nf-core/test-datasets/rnaseq/reference/prokaryotic/SL1344_sub.fasta"
+gff: "https://raw.githubusercontent.com/nf-core/test-datasets/rnaseq/reference/prokaryotic/SL1344_sub.gff3"
+gtf: ""
+transcript_fasta: ""
+additional_fasta: ""
+aligner: star_salmon
+skip_bbsplit: true
+skip_preseq: true
+skip_biotype_qc: true
+skip_deseq2_qc: true
+pseudo_aligner: ""
+min_trimmed_reads: 0

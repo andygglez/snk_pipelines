@@ -1,0 +1,9 @@
+# nf-core tests/remove_ribo_rna.nf.test "--remove_ribo_rna" + trimmer fastp,
+# save_trimmed, save_non_ribo_reads.
+remove_ribo_rna: true
+trimmer: fastp
+save_trimmed: true
+save_non_ribo_reads: true
+skip_qc: true
+skip_stringtie: true
+skip_bigwig: true

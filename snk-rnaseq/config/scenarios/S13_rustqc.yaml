@@ -1,0 +1,2 @@
+# nf-core tests/rustqc.nf.test "use_rustqc"
+use_rustqc: true

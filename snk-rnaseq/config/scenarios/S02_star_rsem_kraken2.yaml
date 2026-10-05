@@ -1,0 +1,11 @@
+# nf-core tests/star_rsem.nf.test + Kraken2 on the filtered (trimmed) reads, as in
+# tests/contaminant_screening_input.nf.test. (kraken2_bracken cannot be exercised
+# on this data: the only Bracken test DB is SARS-CoV-2, nf-core's Bracken then
+# fails with "no reads found", and so does the port.)
+aligner: star_rsem
+skip_pseudo_alignment: true
+contaminant_screening: kraken2
+contaminant_screening_input: trimmed
+save_kraken_assignments: true
+save_kraken_unassigned: true
+save_align_intermeds: true

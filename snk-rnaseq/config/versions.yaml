@@ -1,0 +1,1031 @@
+# nf-core process -> port rules (regexes), optional `when` (Python, Snakefile names + any_wc()),
+# module version-reporting style (file = versions.yml, topic = topic channel) and the
+# version commands of its nf-core module. Generated from the pinned nf-core sources;
+# read by the software_versions rule.
+BBMAP_BBSPLIT:
+  module: BBMAP_BBSPLIT
+  style: topic
+  tools:
+  - - bbmap
+    - bbversion.sh | grep -v "Duplicate cpuset"
+  rules:
+  - bbsplit_index
+  - bbsplit_pe
+  - bbsplit_se
+BEDTOOLS_GENOMECOV_COMBINED:
+  module: BEDTOOLS_GENOMECOV
+  style: topic
+  tools:
+  - - bedtools
+    - bedtools --version | sed -e 's/bedtools v//g'
+  rules:
+  - bedtools_genomecov
+  when: any_wc("strand", "")
+BEDTOOLS_GENOMECOV_FW:
+  module: BEDTOOLS_GENOMECOV
+  style: topic
+  tools:
+  - - bedtools
+    - bedtools --version | sed -e 's/bedtools v//g'
+  rules:
+  - bedtools_genomecov
+  when: any_wc("strand", ".forward")
+BEDTOOLS_GENOMECOV_REV:
+  module: BEDTOOLS_GENOMECOV
+  style: topic
+  tools:
+  - - bedtools
+    - bedtools --version | sed -e 's/bedtools v//g'
+  rules:
+  - bedtools_genomecov
+  when: any_wc("strand", ".reverse")
+BOWTIE2_ALIGN:
+  module: BOWTIE2_ALIGN
+  style: topic
+  tools:
+  - - bowtie2
+    - bowtie2 --version 2>&1 | sed -n 's/.*bowtie2-align-s version //p'
+  - - samtools
+    - samtools version | sed '1!d;s/.* //'
+  - - pigz
+    - pigz --version 2>&1 | sed 's/pigz //'
+  rules:
+  - bowtie2_rrna_se
+  - bowtie2_align_.*
+BOWTIE2_ALIGN_PE:
+  module: BOWTIE2_ALIGN
+  style: topic
+  tools:
+  - - bowtie2
+    - bowtie2 --version 2>&1 | sed -n 's/.*bowtie2-align-s version //p'
+  - - samtools
+    - samtools version | sed '1!d;s/.* //'
+  - - pigz
+    - pigz --version 2>&1 | sed 's/pigz //'
+  rules:
+  - bowtie2_rrna_pe
+BOWTIE2_BUILD:
+  module: BOWTIE2_BUILD
+  style: topic
+  tools:
+  - - bowtie2
+    - bowtie2 --version 2>&1 | sed -n 's/.*bowtie2-align-s version //p'
+  rules:
+  - bowtie2_build_transcripts
+  - bowtie2_build_rrna
+BRACKEN:
+  module: BRACKEN_BRACKEN
+  style: topic
+  tools:
+  - - bracken
+    - bracken -v | cut -f2 -d"v"
+  rules:
+  - bracken
+CAT_FASTQ:
+  module: CAT_FASTQ
+  style: topic
+  tools:
+  - - cat
+    - cat --version 2>&1 | head -n 1 | sed 's/^.*coreutils) //; s/ .*$//'
+  rules:
+  - cat_fastq_se
+  - cat_fastq_pe
+CUSTOM_CATADDITIONALFASTA:
+  module: CUSTOM_CATADDITIONALFASTA
+  style: topic
+  tools:
+  - - python
+    - python3 -c 'import platform; print(platform.python_version())'
+  rules:
+  - custom_catadditionalfasta
+CUSTOM_GTFFILTER:
+  module: CUSTOM_GTFFILTER
+  style: topic
+  tools:
+  - - python
+    - python3 -c 'import platform; print(platform.python_version())'
+  rules:
+  - custom_gtffilter
+CUSTOM_MULTIQCCUSTOMBIOTYPE:
+  module: CUSTOM_MULTIQCCUSTOMBIOTYPE
+  style: topic
+  tools:
+  - - python
+    - python3 -c 'import platform; print(platform.python_version())'
+  rules:
+  - multiqc_custom_biotype
+CUSTOM_RSEMMERGECOUNTS:
+  module: CUSTOM_RSEMMERGECOUNTS
+  style: topic
+  tools:
+  - - sed
+    - sed --version 2>&1 | sed '1!d;s/^.*) //'
+  rules:
+  - custom_rsemmergecounts
+CUSTOM_TX2GENE:
+  module: CUSTOM_TX2GENE
+  style: topic
+  tools:
+  - - python
+    - python3 -c 'import platform; print(platform.python_version())'
+  rules:
+  - custom_tx2gene
+DESEQ2_QC_BAM_SALMON:
+  module: DESEQ2_QC
+  style: topic
+  tools:
+  - - r-base
+    - Rscript -e 'cat(as.character(getRversion()))'
+  - - bioconductor-deseq2
+    - Rscript -e "library(DESeq2); cat(as.character(packageVersion('DESeq2')))"
+  rules:
+  - deseq2_qc
+  when: any_wc("qdir", "star_salmon", "bowtie2_salmon")
+DESEQ2_QC_PSEUDO:
+  module: DESEQ2_QC
+  style: topic
+  tools:
+  - - r-base
+    - Rscript -e 'cat(as.character(getRversion()))'
+  - - bioconductor-deseq2
+    - Rscript -e "library(DESeq2); cat(as.character(packageVersion('DESeq2')))"
+  rules:
+  - deseq2_qc
+  when: any_wc("qdir", "salmon", "kallisto")
+DESEQ2_QC_RSEM:
+  module: DESEQ2_QC
+  style: topic
+  tools:
+  - - r-base
+    - Rscript -e 'cat(as.character(getRversion()))'
+  - - bioconductor-deseq2
+    - Rscript -e "library(DESeq2); cat(as.character(packageVersion('DESeq2')))"
+  rules:
+  - deseq2_qc
+  when: any_wc("qdir", "star_rsem")
+DUPRADAR:
+  module: DUPRADAR
+  style: topic
+  tools:
+  - - bioconductor-dupradar
+    - Rscript -e "cat(as.character(packageVersion('dupRadar')))"
+  rules:
+  - dupradar
+EAUTILS_GTF2BED:
+  module: EAUTILS_GTF2BED
+  style: topic
+  tools:
+  - - perl
+    - perl -e 'my $v = $^V; $v =~ s/^v//; print "$v\n"'
+  rules:
+  - eautils_gtf2bed
+FASTP:
+  module: FASTP
+  style: topic
+  tools:
+  - - fastp
+    - fastp --version 2>&1 | sed -e "s/fastp //g"
+  rules:
+  - fastp_se
+  - fastp_pe
+FASTQC:
+  module: FASTQC
+  style: topic
+  tools:
+  - - fastqc
+    - fastqc --version | sed "/FastQC v/!d; s/.*v//"
+  rules:
+  - fastqc
+  when: TRIMMER == "trimgalore" and any_wc("fqtag", "raw")
+FASTQC_FILTERED:
+  module: FASTQC
+  style: topic
+  tools:
+  - - fastqc
+    - fastqc --version | sed "/FastQC v/!d; s/.*v//"
+  rules:
+  - fastqc
+  when: any_wc("fqtag", "filtered")
+FASTQC_RAW:
+  module: FASTQC
+  style: topic
+  tools:
+  - - fastqc
+    - fastqc --version | sed "/FastQC v/!d; s/.*v//"
+  rules:
+  - fastqc
+  when: TRIMMER == "fastp" and any_wc("fqtag", "raw")
+FASTQC_TRIM:
+  module: FASTQC
+  style: topic
+  tools:
+  - - fastqc
+    - fastqc --version | sed "/FastQC v/!d; s/.*v//"
+  rules:
+  - fastqc
+  when: any_wc("fqtag", "trimmed")
+FQ_LINT:
+  module: FQ_LINT
+  style: topic
+  tools:
+  - - fq
+    - fq lint --version | sed 's/fq-lint //; s/ .*//'
+  rules:
+  - fq_lint
+  when: any_wc("lint_dir", "raw")
+FQ_LINT_AFTER_BBSPLIT:
+  module: FQ_LINT
+  style: topic
+  tools:
+  - - fq
+    - fq lint --version | sed 's/fq-lint //; s/ .*//'
+  rules:
+  - fq_lint
+  when: any_wc("lint_dir", "bbsplit")
+FQ_LINT_AFTER_RIBO_REMOVAL:
+  module: FQ_LINT
+  style: topic
+  tools:
+  - - fq
+    - fq lint --version | sed 's/fq-lint //; s/ .*//'
+  rules:
+  - fq_lint
+  when: any_wc("lint_dir", "sortmerna", "ribodetector", "bowtie2")
+FQ_LINT_AFTER_TRIMMING:
+  module: FQ_LINT
+  style: topic
+  tools:
+  - - fq
+    - fq lint --version | sed 's/fq-lint //; s/ .*//'
+  rules:
+  - fq_lint
+  when: any_wc("lint_dir", "trimmed")
+FQ_SUBSAMPLE:
+  module: FQ_SUBSAMPLE
+  style: topic
+  tools:
+  - - fq
+    - fq subsample --version | sed 's/fq-subsample //; s/ .*//'
+  rules:
+  - fq_subsample
+GFFREAD:
+  module: GFFREAD
+  style: topic
+  tools:
+  - - gffread
+    - gffread --version 2>&1
+  rules:
+  - gffread_gtf
+GFFREAD_GENE_BED:
+  module: GFFREAD
+  style: topic
+  tools:
+  - - gffread
+    - gffread --version 2>&1
+  rules:
+  - gffread_gene_bed
+GFFREAD_TRANSCRIPTS:
+  module: GFFREAD
+  style: topic
+  tools:
+  - - gffread
+    - gffread --version 2>&1
+  rules:
+  - gffread_transcripts
+GUNZIP_ADDITIONAL_FASTA:
+  module: GUNZIP
+  style: topic
+  tools:
+  - - gunzip
+    - gunzip --version 2>&1 | head -1 | sed "s/^.*(gzip) //; s/ Copyright.*//"
+  rules:
+  - gunzip
+  when: HAS_FASTA and str(cfg("additional_fasta")).endswith(".gz")
+GUNZIP_FASTA:
+  module: GUNZIP
+  style: topic
+  tools:
+  - - gunzip
+    - gunzip --version 2>&1 | head -1 | sed "s/^.*(gzip) //; s/ Copyright.*//"
+  rules:
+  - gunzip
+  when: str(cfg("fasta")).endswith(".gz")
+GUNZIP_GENE_BED:
+  module: GUNZIP
+  style: topic
+  tools:
+  - - gunzip
+    - gunzip --version 2>&1 | head -1 | sed "s/^.*(gzip) //; s/ Copyright.*//"
+  rules:
+  - gunzip
+  when: str(cfg("gene_bed")).endswith(".gz")
+GUNZIP_GFF:
+  module: GUNZIP
+  style: topic
+  tools:
+  - - gunzip
+    - gunzip --version 2>&1 | head -1 | sed "s/^.*(gzip) //; s/ Copyright.*//"
+  rules:
+  - gunzip
+  when: not cfg("gtf") and str(cfg("gff")).endswith(".gz")
+GUNZIP_GTF:
+  module: GUNZIP
+  style: topic
+  tools:
+  - - gunzip
+    - gunzip --version 2>&1 | head -1 | sed "s/^.*(gzip) //; s/ Copyright.*//"
+  rules:
+  - gunzip
+  when: str(cfg("gtf")).endswith(".gz")
+GUNZIP_RRNA_FASTAS:
+  module: GUNZIP
+  style: topic
+  tools:
+  - - gunzip
+    - gunzip --version 2>&1 | head -1 | sed "s/^.*(gzip) //; s/ Copyright.*//"
+  rules:
+  - gunzip
+  when: any(f.startswith(GENOME_DIR) for f in RRNA_FASTAS)
+GUNZIP_TRANSCRIPT_FASTA:
+  module: GUNZIP
+  style: topic
+  tools:
+  - - gunzip
+    - gunzip --version 2>&1 | head -1 | sed "s/^.*(gzip) //; s/ Copyright.*//"
+  rules:
+  - gunzip
+  when: str(cfg("transcript_fasta")).endswith(".gz")
+HISAT2_ALIGN:
+  module: HISAT2_ALIGN
+  style: topic
+  tools:
+  - - hisat2
+    - hisat2 --version | sed -n '1s/.*version //p'
+  - - samtools
+    - samtools --version | sed -n '1s/samtools //p'
+  rules:
+  - hisat2_align_.*
+HISAT2_BUILD:
+  module: HISAT2_BUILD
+  style: topic
+  tools:
+  - - hisat2
+    - hisat2 --version | sed -n 's/.*version \([^ ]*\).*/\1/p'
+  rules:
+  - hisat2_build
+HISAT2_EXTRACTSPLICESITES:
+  module: HISAT2_EXTRACTSPLICESITES
+  style: topic
+  tools:
+  - - hisat2
+    - hisat2 --version | grep -o "version [^ ]*" | cut -d " " -f 2
+  - - samtools
+    - samtools --version | sed -n '1s/samtools //p'
+  rules:
+  - hisat2_extractsplicesites
+KALLISTO_INDEX:
+  module: KALLISTO_INDEX
+  style: topic
+  tools:
+  - - kallisto
+    - kallisto 2>&1 | head -1 | sed "s/^kallisto //; s/Usage.*//"
+  rules:
+  - kallisto_index
+KALLISTO_QUANT:
+  module: KALLISTO_QUANT
+  style: topic
+  tools:
+  - - kallisto
+    - kallisto version | sed 's/.*version //'
+  rules:
+  - kallisto_quant
+KRAKEN2:
+  module: KRAKEN2_KRAKEN2
+  style: topic
+  tools:
+  - - kraken2
+    - kraken2 --version 2>&1 | head -1 | sed "s/^.*Kraken version //; s/ .*//"
+  - - pigz
+    - pigz --version 2>&1 | sed "s/pigz //g"
+  rules:
+  - kraken2
+MAKE_TRANSCRIPTS_FASTA:
+  module: RSEM_PREPAREREFERENCE
+  style: topic
+  tools:
+  - - rsem
+    - 'rsem-calculate-expression --version | sed -e "s/Current version: RSEM v//g"'
+  rules:
+  - make_transcripts_fasta
+  when: not SENTIEON
+MULTIQC:
+  module: MULTIQC
+  style: file
+  tools:
+  - - multiqc
+    - multiqc --version | sed "s/.* //g"
+  rules:
+  - multiqc
+  - multiqc_sample
+PARABRICKS_RNA_FQ2BAM:
+  module: PARABRICKS_RNAFQ2BAM
+  style: topic
+  tools:
+  - - parabricks
+    - 'pbrun version 2>&1 | grep -Po ''(?<=^pbrun: ).*'''
+  rules:
+  - parabricks_rnafq2bam_.*
+PARABRICKS_STARGENOMEGENERATE:
+  module: STAR_GENOMEGENERATE
+  style: topic
+  tools:
+  - - star
+    - STAR --version | sed -e "s/STAR_//g"
+  - - samtools
+    - samtools --version | sed -n '1s/samtools //p'
+  - - gawk
+    - gawk --version | sed -n '1{s/GNU Awk //;s/,.*//;p}'
+  rules:
+  - star_genomegenerate
+  when: PARABRICKS
+PICARD_MARKDUPLICATES:
+  module: PICARD_MARKDUPLICATES
+  style: topic
+  tools:
+  - - picard
+    - picard MarkDuplicates --version 2>&1 | sed -n 's/.*Version://p'
+  rules:
+  - picard_markduplicates
+PREPROCESS_TRANSCRIPTS_FASTA_GENCODE:
+  module: PREPROCESS_TRANSCRIPTS_FASTA_GENCODE
+  style: topic
+  tools:
+  - - sed
+    - sed --version 2>&1 | sed '1!d;s/^.*) //'
+  rules:
+  - preprocess_transcripts_fasta_gencode
+PRESEQ_LCEXTRAP:
+  module: PRESEQ_LCEXTRAP
+  style: topic
+  tools:
+  - - preseq
+    - 'preseq 2>&1 | sed -n ''s/Version: //p'''
+  rules:
+  - preseq_lcextrap
+QUALIMAP_RNASEQ:
+  module: QUALIMAP_RNASEQ
+  style: topic
+  tools:
+  - - qualimap
+    - qualimap -h | sed -n 's/^QualiMap v.//p'
+  rules:
+  - qualimap_rnaseq
+RIBODETECTOR:
+  module: RIBODETECTOR
+  style: topic
+  tools:
+  - - ribodetector
+    - ribodetector --version | sed "s/ribodetector //"
+  - - cuda
+    - python -c "import torch; print(torch.version.cuda or 'no CUDA available')"
+  rules:
+  - ribodetector
+RSEM_CALCULATEEXPRESSION:
+  module: RSEM_CALCULATEEXPRESSION
+  style: topic
+  tools:
+  - - rsem
+    - 'rsem-calculate-expression --version | sed ''s/Current version: RSEM v//'''
+  rules:
+  - rsem_calculateexpression
+  when: not SENTIEON
+RSEM_PREPAREREFERENCE_GENOME:
+  module: RSEM_PREPAREREFERENCE
+  style: topic
+  tools:
+  - - rsem
+    - 'rsem-calculate-expression --version | sed -e "s/Current version: RSEM v//g"'
+  rules:
+  - rsem_preparereference_genome
+  when: not SENTIEON
+RSEQC_BAMSTAT:
+  module: RSEQC_BAMSTAT
+  style: topic
+  tools:
+  - - rseqc
+    - bam_stat.py --version | sed "s/bam_stat.py //"
+  rules:
+  - rseqc_bamstat
+RSEQC_INFEREXPERIMENT:
+  module: RSEQC_INFEREXPERIMENT
+  style: topic
+  tools:
+  - - rseqc
+    - infer_experiment.py --version | sed "s/infer_experiment.py //"
+  rules:
+  - rseqc_inferexperiment
+RSEQC_INNERDISTANCE:
+  module: RSEQC_INNERDISTANCE
+  style: topic
+  tools:
+  - - rseqc
+    - inner_distance.py --version | sed "s/inner_distance.py //"
+  rules:
+  - rseqc_innerdistance_pe
+  - rseqc_innerdistance_se
+RSEQC_JUNCTIONANNOTATION:
+  module: RSEQC_JUNCTIONANNOTATION
+  style: topic
+  tools:
+  - - rseqc
+    - junction_annotation.py --version | sed "s/junction_annotation.py //"
+  rules:
+  - rseqc_junctionannotation
+RSEQC_JUNCTIONSATURATION:
+  module: RSEQC_JUNCTIONSATURATION
+  style: topic
+  tools:
+  - - rseqc
+    - junction_saturation.py --version | sed "s/junction_saturation.py //"
+  rules:
+  - rseqc_junctionsaturation
+RSEQC_READDISTRIBUTION:
+  module: RSEQC_READDISTRIBUTION
+  style: topic
+  tools:
+  - - rseqc
+    - read_distribution.py --version | sed "s/read_distribution.py //"
+  rules:
+  - rseqc_readdistribution
+RSEQC_READDUPLICATION:
+  module: RSEQC_READDUPLICATION
+  style: topic
+  tools:
+  - - rseqc
+    - read_duplication.py --version | sed "s/read_duplication.py //"
+  rules:
+  - rseqc_readduplication
+RSEQC_TIN:
+  module: RSEQC_TIN
+  style: topic
+  tools:
+  - - rseqc
+    - tin.py --version | sed "s/tin.py //"
+  rules:
+  - rseqc_tin
+RUSTQC:
+  module: RUSTQC
+  style: topic
+  tools:
+  - - rustqc
+    - rustqc --version 2>&1 | sed -n '1s/rustqc //; 1s/ .*//p'
+  rules:
+  - rustqc
+SALMON_INDEX:
+  module: SALMON_INDEX
+  style: topic
+  tools:
+  - - salmon
+    - salmon --version | sed 's/salmon //'
+  rules:
+  - salmon_index
+SALMON_QUANT:
+  module: SALMON_QUANT
+  style: topic
+  tools:
+  - - salmon
+    - salmon --version | sed -e "s/salmon //g"
+  rules:
+  - salmon_strand
+  - salmon_quant_bam
+  - salmon_quant_reads
+SAMTOOLS_FAIDX:
+  module: SAMTOOLS_FAIDX
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed '1!d;s/.* //'
+  rules:
+  - samtools_faidx
+SAMTOOLS_FASTQ_BOWTIE2:
+  module: SAMTOOLS_FASTQ
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed '1!d;s/.* //'
+  rules:
+  - samtools_fastq_bowtie2
+SAMTOOLS_FLAGSTAT:
+  module: SAMTOOLS_FLAGSTAT
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed '1!d;s/.* //'
+  rules:
+  - samtools_flagstat_.*
+SAMTOOLS_IDXSTATS:
+  module: SAMTOOLS_IDXSTATS
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed '1!d;s/.* //'
+  rules:
+  - samtools_idxstats_.*
+SAMTOOLS_INDEX:
+  module: SAMTOOLS_INDEX
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed '1!d;s/.* //'
+  rules:
+  - samtools_index_(sorted|markdup|umi_genome|umi_transcriptome|transcriptome_sorted|input)
+SAMTOOLS_INDEX_PRIMARY:
+  module: SAMTOOLS_INDEX
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed '1!d;s/.* //'
+  rules:
+  - samtools_index_primary_.*
+SAMTOOLS_SORT:
+  module: SAMTOOLS_SORT
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed '1!d;s/.* //'
+  rules:
+  - samtools_sort
+  - samtools_sort_transcriptome
+  - samtools_sort_umi_transcriptome
+SAMTOOLS_SORT_QUALIMAP:
+  module: SAMTOOLS_SORT
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed '1!d;s/.* //'
+  rules:
+  - samtools_sort_qualimap
+SAMTOOLS_STATS:
+  module: SAMTOOLS_STATS
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed "1!d;s/.* //"
+  rules:
+  - samtools_stats_.*
+SAMTOOLS_VIEW_BOWTIE2:
+  module: SAMTOOLS_VIEW
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed "1!d;s/.* //"
+  rules:
+  - samtools_view_bowtie2
+SAMTOOLS_VIEW_PRIMARY:
+  module: SAMTOOLS_VIEW
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed "1!d;s/.* //"
+  rules:
+  - samtools_view_primary
+SENTIEON_MAKE_TRANSCRIPTS_FASTA:
+  module: SENTIEON_RSEMPREPAREREFERENCE
+  style: topic
+  tools:
+  - - rsem
+    - 'rsem-calculate-expression --version | sed -e "s/Current version: RSEM v//g"'
+  - - star
+    - STAR --version | sed -e "s/STAR_//g"
+  - - sentieon
+    - sentieon driver --version 2>&1 | sed -e "s/sentieon-genomics-//g"
+  rules:
+  - make_transcripts_fasta
+  when: SENTIEON
+SENTIEON_RSEMCALCULATEEXPRESSION:
+  module: SENTIEON_RSEMCALCULATEEXPRESSION
+  style: topic
+  tools:
+  - - rsem
+    - 'rsem-calculate-expression --version | sed -e "s/Current version: RSEM v//g"'
+  - - star
+    - STAR --version | sed -e "s/STAR_//g"
+  - - sentieon
+    - sentieon driver --version 2>&1 | sed -e "s/sentieon-genomics-//g"
+  rules:
+  - rsem_calculateexpression
+  when: SENTIEON
+SENTIEON_RSEM_PREPAREREFERENCE_GENOME:
+  module: SENTIEON_RSEMPREPAREREFERENCE
+  style: topic
+  tools:
+  - - rsem
+    - 'rsem-calculate-expression --version | sed -e "s/Current version: RSEM v//g"'
+  - - star
+    - STAR --version | sed -e "s/STAR_//g"
+  - - sentieon
+    - sentieon driver --version 2>&1 | sed -e "s/sentieon-genomics-//g"
+  rules:
+  - rsem_preparereference_genome
+  when: SENTIEON
+SENTIEON_STAR_ALIGN:
+  module: SENTIEON_STARALIGN
+  style: topic
+  tools:
+  - - star
+    - sentieon STAR --version | sed -e "s/STAR_//g"
+  - - sentieon
+    - sentieon driver --version 2>&1 | sed -e "s/sentieon-genomics-//g"
+  rules:
+  - star_align_.*
+  when: SENTIEON
+SEQKIT_REPLACE:
+  module: SEQKIT_REPLACE
+  style: topic
+  tools:
+  - - seqkit
+    - seqkit version | sed 's/^.*v//'
+  rules:
+  - seqkit_replace_rrna
+SEQKIT_REPLACE_U2T:
+  module: SEQKIT_REPLACE
+  style: topic
+  tools:
+  - - seqkit
+    - seqkit version | sed 's/^.*v//'
+  rules:
+  - seqkit_replace_u2t
+SEQKIT_STATS:
+  module: SEQKIT_STATS
+  style: topic
+  tools:
+  - - seqkit
+    - seqkit version | sed 's/^.*v//'
+  rules:
+  - seqkit_stats_rrna
+SE_GENE_UNIFIED:
+  module: SUMMARIZEDEXPERIMENT_SUMMARIZEDEXPERIMENT
+  style: topic
+  tools:
+  - - bioconductor-summarizedexperiment
+    - Rscript -e "cat(as.character(packageVersion('SummarizedExperiment')))"
+  rules:
+  - summarizedexperiment
+  when: any_wc("level", "gene")
+SE_TRANSCRIPT_UNIFIED:
+  module: SUMMARIZEDEXPERIMENT_SUMMARIZEDEXPERIMENT
+  style: topic
+  tools:
+  - - bioconductor-summarizedexperiment
+    - Rscript -e "cat(as.character(packageVersion('SummarizedExperiment')))"
+  rules:
+  - summarizedexperiment
+  when: any_wc("level", "transcript")
+SORTMERNA:
+  module: SORTMERNA
+  style: topic
+  tools:
+  - - sortmerna
+    - sortmerna --version 2>&1 | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1
+  rules:
+  - sortmerna
+SORTMERNA_INDEX:
+  module: SORTMERNA
+  style: topic
+  tools:
+  - - sortmerna
+    - sortmerna --version 2>&1 | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1
+  rules:
+  - sortmerna_index
+STAR_ALIGN:
+  module: STAR_ALIGN
+  style: topic
+  tools:
+  - - star
+    - STAR --version | sed "s/STAR_//"
+  - - samtools
+    - samtools --version | sed -n '1s/samtools //p'
+  - - gawk
+    - gawk --version | sed -n '1s/GNU Awk \([0-9.]*\).*/\1/p'
+  rules:
+  - star_align_.*
+  when: not SENTIEON
+STAR_GENOMEGENERATE:
+  module: STAR_GENOMEGENERATE
+  style: topic
+  tools:
+  - - star
+    - STAR --version | sed -e "s/STAR_//g"
+  - - samtools
+    - samtools --version | sed -n '1s/samtools //p'
+  - - gawk
+    - gawk --version | sed -n '1{s/GNU Awk //;s/,.*//;p}'
+  rules:
+  - star_genomegenerate
+  when: not PARABRICKS
+STAR_GENOMEPARAMS_UPGRADE:
+  module: STAR_GENOMEPARAMS_UPGRADE
+  style: topic
+  tools:
+  - - gawk
+    - awk -Wversion | sed '1!d; s/.*Awk //; s/,.*//'
+  rules:
+  - star_genomeparams_upgrade
+STRINGTIE_MERGE:
+  module: STRINGTIE_MERGE
+  style: topic
+  tools:
+  - - stringtie
+    - stringtie --version
+  rules:
+  - stringtie_merge
+STRINGTIE_STRINGTIE:
+  module: STRINGTIE_STRINGTIE
+  style: topic
+  tools:
+  - - stringtie
+    - stringtie --version
+  rules:
+  - stringtie
+  - stringtie_denovo
+SUBREAD_FEATURECOUNTS:
+  module: SUBREAD_FEATURECOUNTS
+  style: topic
+  tools:
+  - - subread
+    - featureCounts -v 2>&1 | sed 's/featureCounts v//'
+  rules:
+  - featurecounts
+SYLPHTAX_TAXPROF:
+  module: SYLPHTAX_TAXPROF
+  style: topic
+  tools:
+  - - sylph-tax
+    - sylph-tax --version 2>&1 | tail -1
+  rules:
+  - sylphtax_taxprof
+SYLPH_PROFILE:
+  module: SYLPH_PROFILE
+  style: topic
+  tools:
+  - - sylph
+    - sylph -V | sed "s/sylph //g"
+  rules:
+  - sylph_profile
+TRIMGALORE:
+  module: TRIMGALORE
+  style: topic
+  tools:
+  - - trimgalore
+    - trim_galore --version | grep -Eo "[0-9]+(\.[0-9]+)+"
+  rules:
+  - trimgalore_pe
+  - trimgalore_se
+TXIMETA_TXIMPORT:
+  module: TXIMETA_TXIMPORT
+  style: topic
+  tools:
+  - - bioconductor-tximeta
+    - Rscript -e "cat(as.character(packageVersion('tximeta')))"
+  rules:
+  - tximport
+  - tximport_sample
+UCSC_BEDCLIP:
+  module: UCSC_BEDCLIP
+  style: topic
+  tools:
+  - - ucsc
+    - echo 482
+  rules:
+  - ucsc_bedclip
+UCSC_BEDGRAPHTOBIGWIG:
+  module: UCSC_BEDGRAPHTOBIGWIG
+  style: topic
+  tools:
+  - - ucsc
+    - echo 482
+  rules:
+  - ucsc_bedgraphtobigwig
+UMICOLLAPSE:
+  module: UMICOLLAPSE
+  style: topic
+  tools:
+  - - umicollapse
+    - echo 1.1.0-0
+  rules:
+  - umicollapse_.*
+UMITOOLS_DEDUP:
+  module: UMITOOLS_DEDUP
+  style: topic
+  tools:
+  - - umitools
+    - 'umi_tools --version | sed ''s/UMI-tools version: //'''
+  rules:
+  - umitools_dedup_.*
+UMITOOLS_EXTRACT:
+  module: UMITOOLS_EXTRACT
+  style: topic
+  tools:
+  - - umitools
+    - 'umi_tools --version | sed -n ''/version:/s/.*: //p'''
+  rules:
+  - umitools_extract_se
+  - umitools_extract_pe
+UMITOOLS_PREPAREFORRSEM:
+  module: UMITOOLS_PREPAREFORRSEM
+  style: topic
+  tools:
+  - - umitools
+    - 'umi_tools --version | sed ''s/UMI-tools version: //'''
+  rules:
+  - umitools_prepareforrsem
+UNTAR_BBSPLIT_INDEX:
+  module: UNTAR
+  style: topic
+  tools:
+  - - untar
+    - tar --version 2>&1 | head -1 | sed "s/tar (GNU tar) //; s/ Copyright.*//"
+  rules:
+  - untar
+  when: any_wc("name", untar_name("bbsplit_index")) and not SKIP_BBSPLIT
+UNTAR_BOWTIE2_INDEX:
+  module: UNTAR
+  style: topic
+  tools:
+  - - untar
+    - tar --version 2>&1 | head -1 | sed "s/tar (GNU tar) //; s/ Copyright.*//"
+  rules:
+  - untar
+  when: any_wc("name", untar_name("bowtie2_index"))
+UNTAR_BOWTIE2_RRNA_INDEX:
+  module: UNTAR
+  style: topic
+  tools:
+  - - untar
+    - tar --version 2>&1 | head -1 | sed "s/tar (GNU tar) //; s/ Copyright.*//"
+  rules:
+  - untar
+  when: any_wc("name", untar_name("bowtie2_rrna_index"))
+UNTAR_HISAT2_INDEX:
+  module: UNTAR
+  style: topic
+  tools:
+  - - untar
+    - tar --version 2>&1 | head -1 | sed "s/tar (GNU tar) //; s/ Copyright.*//"
+  rules:
+  - untar
+  when: any_wc("name", untar_name("hisat2_index"))
+UNTAR_KALLISTO_INDEX:
+  module: UNTAR
+  style: topic
+  tools:
+  - - untar
+    - tar --version 2>&1 | head -1 | sed "s/tar (GNU tar) //; s/ Copyright.*//"
+  rules:
+  - untar
+  when: any_wc("name", untar_name("kallisto_index"))
+UNTAR_KRAKEN_DB:
+  module: UNTAR
+  style: topic
+  tools:
+  - - untar
+    - tar --version 2>&1 | head -1 | sed "s/tar (GNU tar) //; s/ Copyright.*//"
+  rules:
+  - untar
+  when: any_wc("name", untar_name("kraken_db"))
+UNTAR_RSEM_INDEX:
+  module: UNTAR
+  style: topic
+  tools:
+  - - untar
+    - tar --version 2>&1 | head -1 | sed "s/tar (GNU tar) //; s/ Copyright.*//"
+  rules:
+  - untar
+  when: any_wc("name", untar_name("rsem_index"))
+UNTAR_SALMON_INDEX:
+  module: UNTAR
+  style: topic
+  tools:
+  - - untar
+    - tar --version 2>&1 | head -1 | sed "s/tar (GNU tar) //; s/ Copyright.*//"
+  rules:
+  - untar
+  when: any_wc("name", untar_name("salmon_index"))
+UNTAR_SORTMERNA_INDEX:
+  module: UNTAR
+  style: topic
+  tools:
+  - - untar
+    - tar --version 2>&1 | head -1 | sed "s/tar (GNU tar) //; s/ Copyright.*//"
+  rules:
+  - untar
+  when: any_wc("name", untar_name("sortmerna_index"))
+UNTAR_STAR_INDEX:
+  module: UNTAR
+  style: topic
+  tools:
+  - - untar
+    - tar --version 2>&1 | head -1 | sed "s/tar (GNU tar) //; s/ Copyright.*//"
+  rules:
+  - untar
+  when: any_wc("name", untar_name("star_index"))

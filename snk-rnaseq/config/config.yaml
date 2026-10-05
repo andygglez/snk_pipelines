@@ -6,9 +6,12 @@
 # =============================================================================
 
 # ---- Input / output ---------------------------------------------------------
-# CSV with header: sample,fastq_1,fastq_2,strandedness[,seq_platform,seq_center]
+# CSV with header: sample,fastq_1,fastq_2,strandedness[,seq_platform,seq_center,
+# genome_bam,transcriptome_bam,percent_mapped]
 # Several rows per sample = several runs, concatenated by CAT_FASTQ.
 # strandedness: forward | reverse | unstranded | auto (inferred with Salmon).
+# genome_bam / transcriptome_bam / percent_mapped: pre-aligned BAMs, only used
+# with skip_alignment (they replace the alignment step).
 # Paths may be local or http(s)/ftp URLs.
 input: "config/samplesheet.csv"  ### <path to samplesheet CSV>
 outdir: "results"            ### <directory>
@@ -17,7 +20,12 @@ outdir: "results"            ### <directory>
 workdir: "work"              ### <directory>
 
 # ---- References -------------------------------------------------------------
-fasta: ""                    ### <path or URL: .fa/.fasta(.gz)>  # Genome FASTA (.gz allowed). Required.
+# iGenomes: `genome` fills every reference parameter left empty from
+# config/igenomes.yaml. Index directories need a local igenomes_base mirror.
+genome: ""                   ### <iGenomes key, e.g. "GRCh38", or "">
+igenomes_base: "s3://ngi-igenomes/igenomes/"  ### <local iGenomes mirror, or the default (HTTPS mirror of the S3 bucket)>
+igenomes_ignore: false       ### [true, false]  # do not load config/igenomes.yaml
+fasta: ""                    ### <path or URL: .fa/.fasta(.gz), or "">  # Genome FASTA (.gz allowed). Required unless skip_alignment with transcript_fasta or a pseudo-aligner index
 gtf: ""                      ### <path or URL: .gtf(.gz), or "" if gff is set>  # GTF (.gz allowed). Either gtf or gff is required.
 gff: ""                      ### <path or URL: .gff/.gff3(.gz), or "">  # GFF3, converted to GTF with gffread if gtf is empty
 additional_fasta: ""         ### <path or URL: .fa/.fasta(.gz), or "">  # Extra sequences (e.g. spike-ins) appended to genome and GTF
@@ -25,11 +33,15 @@ transcript_fasta: ""         ### <path or URL: .fa/.fasta(.gz), or "" to build> 
 gene_bed: ""                 ### <path or URL: .bed(.gz), or "" to build>  # BED12 of genes; built from the GTF if empty
 star_index: ""               ### <path or URL: index directory or .tar.gz, or "" to build>  # STAR index directory or .tar.gz; built if empty
 salmon_index: ""             ### <path or URL: index directory or .tar.gz, or "" to build>  # Salmon index directory or .tar.gz; built if empty
-hisat2_index: ""             ### [""]  # Only used with aligner: hisat2 (not ported yet)
+rsem_index: ""               ### <path or URL: index directory or .tar.gz, or "" to build>  # RSEM index (aligner star_rsem)
+hisat2_index: ""             ### <path or URL: index directory or .tar.gz, or "" to build>  # HISAT2 index (aligner hisat2)
+hisat2_build_memory: "200.GB"  ### <memory, e.g. "200.GB">  # HISAT2_BUILD uses splice sites/exons only when resources.hisat2_build.mem_mb reaches this
+bowtie2_index: ""            ### <path or URL: index directory or .tar.gz, or "" to build>  # Bowtie2 transcriptome index (aligner bowtie2_salmon)
+kallisto_index: ""           ### <path or URL: index file or .tar.gz, or "" to build>  # Kallisto index (pseudo_aligner kallisto)
 bbsplit_index: ""            ### <path or URL: index directory or .tar.gz, or "" to build>  # BBSplit index directory or .tar.gz; built if empty
 bbsplit_fasta_list: ""       ### <path or URL to CSV, or "">  # CSV name,fasta of genomes to split out with BBSplit
-kraken_db: ""                ### [""]  # Only used with contaminant_screening (not ported yet)
-splicesites: ""              ### <path or URL, or "">
+kraken_db: ""                ### <path or URL: database directory or .tar.gz, or "">  # Kraken2 (and Bracken) database for contaminant_screening
+splicesites: ""              ### <path or URL, or "">  # HISAT2 splice sites; extracted from the GTF if empty
 gencode: false               ### [true, false]  # GENCODE annotation: gene_type biotype, --gencode for salmon index
 gtf_extra_attributes: "gene_name"  ### <GTF attribute name(s), comma-separated>
 gtf_group_features: "gene_id"  ### <GTF attribute name>
@@ -38,20 +50,32 @@ skip_gtf_transcript_filter: false  ### [true, false]
 featurecounts_feature_type: "exon"  ### <GTF feature type, e.g. "exon">
 featurecounts_group_type: "gene_biotype"  ### <GTF attribute, e.g. "gene_biotype">
 gffread_transcript_fasta: false  ### [true, false]
+prokaryotic: false           ### [true, false]  # CDS-only annotation: gffread gene BED, STAR --sjdbGTFfeatureExon CDS --alignIntronMax 1 (see config/prokaryotic.yaml for the nf-core profile)
 save_reference: false        ### [true, false]  # Publish genome/ and genome/index/ under outdir
 
-# ---- UMI handling (not ported yet; must stay false) -------------------------
-with_umi: false              ### [false]
-umitools_bc_pattern: ""      ### <string, or "">  # only used with with_umi (set by the nf-core test profile)
+# ---- UMI handling -----------------------------------------------------------
+with_umi: false              ### [true, false]
+skip_umi_extract: false      ### [true, false]  # UMIs already in the read names
+umitools_extract_method: "string"  ### ["string", "regex"]
+umitools_bc_pattern: ""      ### <string, or "">  # required with with_umi unless skip_umi_extract
+umitools_bc_pattern2: ""     ### <string, or "">
+umitools_umi_separator: ""   ### <string, or "">
+umi_discard_read: 0          ### [0, 1, 2]  # discard R1 / R2 after extraction (sample becomes single-end)
+umi_dedup_tool: "umitools"   ### ["umitools", "umicollapse"]
+umitools_grouping_method: "directional"  ### ["unique", "percentile", "cluster", "adjacency", "directional"]
+umitools_dedup_stats: false  ### [true, false]
+umitools_dedup_primary_only: false  ### [true, false]
+save_umi_intermeds: false    ### [true, false]
 
 # ---- Linting ----------------------------------------------------------------
 skip_linting: false          ### [true, false]
 extra_fqlint_args: "--disable-validator P001"  ### <string: fq lint arguments>
 
 # ---- Trimming ---------------------------------------------------------------
-trimmer: "trimgalore"        ### ["trimgalore"]  # fastp is not ported yet
+trimmer: "trimgalore"        ### ["trimgalore", "fastp"]
 min_trimmed_reads: 10000     ### <integer>
 extra_trimgalore_args: ""    ### <string: Trim Galore arguments, or "">
+extra_fastp_args: ""         ### <string: fastp arguments, or "">
 save_trimmed: false          ### [true, false]
 skip_trimming: false         ### [true, false]
 
@@ -59,30 +83,50 @@ skip_trimming: false         ### [true, false]
 save_bbsplit_reads: false    ### [true, false]
 skip_bbsplit: true           ### [true, false]
 
-# ---- Ribosomal RNA removal (not ported yet; must stay false) ----------------
-remove_ribo_rna: false       ### [false]
+# ---- Ribosomal RNA removal --------------------------------------------------
+remove_ribo_rna: false       ### [true, false]
+ribo_removal_tool: "sortmerna"  ### ["sortmerna", "ribodetector", "bowtie2"]
+use_gpu_ribodetector: false  ### [true, false]  # GPU RiboDetector; add "--nv" to --apptainer-args
+ribo_database_manifest: "assets/rrna-db-defaults.txt"  ### <path: text file with one rRNA FASTA path/URL per line>
+sortmerna_index: ""          ### <path or URL: SortMeRNA idx directory or .tar.gz, or "" to build>
+bowtie2_rrna_index: ""       ### <path or URL: Bowtie2 rRNA index directory or .tar.gz, or "" to build>
+save_non_ribo_reads: false   ### [true, false]
+# Module ext.args that the nf-core test profile overrides (conf/test.config)
+ribodetector_args: "-e rrna" ### <string>
+bowtie2_rrna_args: "--very-sensitive-local"  ### <string>
 
 # ---- Alignment --------------------------------------------------------------
-aligner: "star_salmon"       ### ["star_salmon"]  # star_rsem, hisat2, bowtie2_salmon are not ported yet
-pseudo_aligner: ""           ### ["", "salmon"]  # kallisto is not ported yet
+aligner: "star_salmon"       ### ["star_salmon", "star_rsem", "hisat2", "bowtie2_salmon"]
+pseudo_aligner: ""           ### ["", "salmon", "kallisto"]
 pseudo_aligner_kmer_size: 31 ### <integer>
 seq_center: ""               ### <string, or "">
 seq_platform: ""             ### <string, or "">
-bam_csi_index: false         ### [false]  # not ported yet; must stay false
+bam_csi_index: false         ### [true, false]  # CSI instead of BAI (contigs > 512 Mbp)
 star_ignore_sjdbgtf: false   ### [true, false]
 salmon_quant_libtype: ""     ### ["", "A", "IS", "ISF", "ISR", "IU", "MS", "MSF", "MSR", "MU", "OS", "OSF", "OSR", "OU", "SF", "SR", "U"]
-stringtie_ignore_gtf: false  ### [false]  # not ported yet; must stay false
+stringtie_ignore_gtf: false  ### [true, false]  # de novo StringTie assembly + merge, then quantify against the merged GTF
 min_mapped_reads: 5          ### <number (percent)>
+use_sentieon_star: false     ### [true, false]  # Sentieon STAR/RSEM; needs SENTIEON_LICENSE (or SENTIEON_LICENSE_BASE64) in the environment
+use_parabricks_star: false   ### [true, false]  # Parabricks rna_fq2bam on GPU; add "--nv" to --apptainer-args
+parabricks_num_gpus: 1       ### <integer>  # --num-gpus (process_gpu accelerator = 1)
+gpu_container_options: ""    ### <string, or "">  # nf-core container options for GPU tasks; here pass them with --apptainer-args
+arm: false                   ### [true, false]  # nf-core ARM profile flag (GPU tools are rejected on ARM)
 extra_star_align_args: ""    ### <string: STAR arguments, or "">
+extra_hisat2_align_args: ""  ### <string: HISAT2 arguments, or "">
+extra_bowtie2_align_args: "" ### <string: Bowtie2 arguments, or "">
+bowtie2_align_base_args: "--very-sensitive --no-discordant -k 200"  ### <string>  # ALIGN_BOWTIE2 ext.args before extra_bowtie2_align_args
 extra_salmon_index_args: ""  ### <string: salmon index arguments, or "">
 extra_salmon_quant_args: ""  ### <string: salmon quant arguments, or "">
+extra_kallisto_quant_args: ""  ### <string: kallisto quant arguments, or "">
+kallisto_quant_fraglen: 200  ### <integer>  # single-end fragment length
+kallisto_quant_fraglen_sd: 200  ### <integer>
 save_merged_fastq: false     ### [true, false]
 save_unaligned: false        ### [true, false]
 save_align_intermeds: false  ### [true, false]
 skip_markduplicates: false   ### [true, false]
-skip_alignment: false        ### [false]  # not ported yet; must stay false
+skip_alignment: false        ### [true, false]  # pre-aligned BAMs from the samplesheet are used instead
 skip_pseudo_alignment: false ### [true, false]
-skip_quantification_merge: false  ### [false]  # not ported yet; must stay false
+skip_quantification_merge: false  ### [true, false]  # per-sample tximport/MultiQC; per-sample outputs go to <outdir>/<sample>/
 stranded_threshold: 0.8      ### <number between 0 and 1>
 unstranded_threshold: 0.1    ### <number between 0 and 1>
 
@@ -100,8 +144,14 @@ skip_deseq2_qc: false        ### [true, false]
 skip_multiqc: false          ### [true, false]
 deseq2_vst: true             ### [true, false]
 rseqc_modules: "bam_stat,inner_distance,infer_experiment,junction_annotation,junction_saturation,read_distribution,read_duplication"  ### <comma-separated, any of: bam_stat, inner_distance, infer_experiment, junction_annotation, junction_saturation, read_distribution, read_duplication, tin>
-contaminant_screening: ""    ### [""]  # not ported yet; must stay empty
-use_rustqc: false            ### [false]  # not ported yet; must stay false
+contaminant_screening: ""    ### ["", "kraken2", "kraken2_bracken", "sylph"]
+contaminant_screening_input: "unmapped"  ### ["unmapped", "trimmed", "trim_only", "raw"]
+save_kraken_assignments: false  ### [true, false]  # as in nf-core 3.27.0, this saves the (un)classified reads
+save_kraken_unassigned: false   ### [true, false]  # as in nf-core 3.27.0, this saves the per-read assignments
+bracken_precision: "S"       ### ["D", "P", "C", "O", "F", "G", "S"]
+sylph_db: ""                 ### <comma-separated paths/URLs of .syldb databases, or "">
+sylph_taxonomy: ""           ### <comma-separated paths/URLs of sylph-tax metadata, or "">
+use_rustqc: false            ### [true, false]  # RustQC instead of Preseq/featureCounts/Qualimap/dupRadar/RSeQC
 
 # ---- MultiQC ----------------------------------------------------------------
 multiqc_config: ""           ### <path to YAML, or "">  # extra user config, added after assets/multiqc_config.yml
@@ -118,3 +168,7 @@ resources:
   process_high:   {threads: 12, mem_mb: 73728}  ### {threads: <integer>, mem_mb: <integer>}
   # conf/modules/trimgalore.config overrides TRIMGALORE to 8 cpus / 4 GB
   trimgalore:     {threads: 8,  mem_mb: 4096}  ### {threads: <integer>, mem_mb: <integer>}
+  # UMICOLLAPSE: process_high + process_high_memory (200 GB)
+  umicollapse:    {threads: 12, mem_mb: 204800}  ### {threads: <integer>, mem_mb: <integer>}
+  # HISAT2_BUILD: process_high cpus, 200 GB (conf/modules/prepare_genome.config)
+  hisat2_build:   {threads: 12, mem_mb: 204800}  ### {threads: <integer>, mem_mb: <integer>}

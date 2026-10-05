@@ -1,0 +1,511 @@
+# nf-core process -> port rules (regexes), optional `when` (Python, Snakefile names + any_wc()),
+# module version-reporting style (file = versions.yml, topic = topic channel) and the
+# version commands of its nf-core module. Generated from the pinned nf-core sources;
+# read by the software_versions rule.
+BAMTOOLS_FILTER:
+  module: BAMTOOLS_FILTER
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  - - bamtools
+    - echo $(bamtools --version 2>&1) | sed 's/^.*bamtools //; s/Part .*$//'
+  rules:
+  - bamtools_filter_pe
+  - bamtools_filter_se
+BAM_REMOVE_ORPHANS:
+  module: BAM_REMOVE_ORPHANS
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - bam_remove_orphans
+BEDTOOLS_GENOMECOV:
+  module: BEDTOOLS_GENOMECOV
+  style: file
+  tools:
+  - - bedtools
+    - bedtools --version | sed -e "s/bedtools v//g"
+  rules:
+  - bedtools_genomecov
+BOWTIE2_ALIGN:
+  module: BOWTIE2_ALIGN
+  style: file
+  tools:
+  - - bowtie2
+    - echo $(bowtie2 --version 2>&1) | sed 's/^.*bowtie2-align-s version //; s/ .*$//'
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  - - pigz
+    - ' pigz --version 2>&1 | sed ''s/pigz //g'' '
+  rules:
+  - bowtie2_align
+BOWTIE2_BUILD:
+  module: BOWTIE2_BUILD
+  style: file
+  tools:
+  - - bowtie2
+    - echo $(bowtie2 --version 2>&1) | sed 's/^.*bowtie2-align-s version //; s/ .*$//'
+  rules:
+  - bowtie2_build
+BWA_INDEX:
+  module: BWA_INDEX
+  style: file
+  tools:
+  - - bwa
+    - 'echo $(bwa 2>&1) | sed ''s/^.*Version: //; s/Contact:.*$//'''
+  rules:
+  - bwa_index
+BWA_MEM:
+  module: BWA_MEM
+  style: file
+  tools:
+  - - bwa
+    - 'echo $(bwa 2>&1) | sed ''s/^.*Version: //; s/Contact:.*$//'''
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - bwa_mem
+CHROMAP_CHROMAP:
+  module: CHROMAP_CHROMAP
+  style: file
+  tools:
+  - - chromap
+    - echo $(chromap --version 2>&1)
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - chromap
+CHROMAP_INDEX:
+  module: CHROMAP_INDEX
+  style: file
+  tools:
+  - - chromap
+    - echo $(chromap --version 2>&1)
+  rules:
+  - chromap_index
+CUSTOM_GETCHROMSIZES:
+  module: CUSTOM_GETCHROMSIZES
+  style: file
+  tools:
+  - - getchromsizes
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - custom_getchromsizes
+DEEPTOOLS_COMPUTEMATRIX_REFERENCE_POINT:
+  module: DEEPTOOLS_COMPUTEMATRIX
+  style: file
+  tools:
+  - - deeptools
+    - computeMatrix --version | sed -e "s/computeMatrix //g"
+  rules:
+  - deeptools_computematrix_reference_point
+DEEPTOOLS_COMPUTEMATRIX_SCALE_REGIONS:
+  module: DEEPTOOLS_COMPUTEMATRIX
+  style: file
+  tools:
+  - - deeptools
+    - computeMatrix --version | sed -e "s/computeMatrix //g"
+  rules:
+  - deeptools_computematrix_scale_regions
+DEEPTOOLS_PLOTHEATMAP:
+  module: DEEPTOOLS_PLOTHEATMAP
+  style: file
+  tools:
+  - - deeptools
+    - plotHeatmap --version | sed -e "s/plotHeatmap //g"
+  rules:
+  - deeptools_plotheatmap
+DEEPTOOLS_PLOTPROFILE:
+  module: DEEPTOOLS_PLOTPROFILE
+  style: file
+  tools:
+  - - deeptools
+    - plotProfile --version | sed -e "s/plotProfile //g"
+  rules:
+  - deeptools_plotprofile
+DESEQ2_QC:
+  module: DESEQ2_QC
+  style: file
+  tools:
+  - - r-base
+    - echo $(R --version 2>&1) | sed 's/^.*R version //; s/ .*$//'
+  - - bioconductor-deseq2
+    - Rscript -e "library(DESeq2); cat(as.character(packageVersion('DESeq2')))"
+  rules:
+  - deseq2_qc.*
+FASTQC:
+  module: FASTQC
+  style: file
+  tools:
+  - - fastqc
+    - ' fastqc --version | sed -e "s/FastQC v//g" '
+  rules:
+  - fastqc_se
+  - fastqc_pe
+FRIP_SCORE:
+  module: FRIP_SCORE
+  style: file
+  tools:
+  - - bedtools
+    - bedtools --version | sed -e "s/bedtools v//g"
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - frip_score
+GENOME_BLACKLIST_REGIONS:
+  module: GENOME_BLACKLIST_REGIONS
+  style: file
+  tools:
+  - - bedtools
+    - bedtools --version | sed -e "s/bedtools v//g"
+  rules:
+  - genome_blacklist_regions
+GET_AUTOSOMES:
+  module: GET_AUTOSOMES
+  style: file
+  tools:
+  - - python
+    - python --version | sed 's/Python //g'
+  rules:
+  - get_autosomes
+GFFREAD:
+  module: GFFREAD
+  style: file
+  tools:
+  - - gffread
+    - gffread --version 2>&1
+  rules:
+  - gffread
+GTF2BED:
+  module: GTF2BED
+  style: file
+  tools:
+  - - perl
+    - echo $(perl --version 2>&1) | sed 's/.*v\(.*\)) built.*/\1/'
+  rules:
+  - gtf2bed
+GUNZIP_BLACKLIST:
+  module: GUNZIP
+  style: file
+  tools:
+  - - gunzip
+    - echo $(gunzip --version 2>&1) | sed 's/^.*(gzip) //; s/ Copyright.*$//'
+  rules:
+  - gunzip
+  when: str(param("blacklist")).endswith(".gz")
+GUNZIP_FASTA:
+  module: GUNZIP
+  style: file
+  tools:
+  - - gunzip
+    - echo $(gunzip --version 2>&1) | sed 's/^.*(gzip) //; s/ Copyright.*$//'
+  rules:
+  - gunzip
+  when: str(param("fasta")).endswith(".gz")
+GUNZIP_GENE_BED:
+  module: GUNZIP
+  style: file
+  tools:
+  - - gunzip
+    - echo $(gunzip --version 2>&1) | sed 's/^.*(gzip) //; s/ Copyright.*$//'
+  rules:
+  - gunzip
+  when: str(param("gene_bed")).endswith(".gz")
+GUNZIP_GFF:
+  module: GUNZIP
+  style: file
+  tools:
+  - - gunzip
+    - echo $(gunzip --version 2>&1) | sed 's/^.*(gzip) //; s/ Copyright.*$//'
+  rules:
+  - gunzip
+  when: not param("gtf") and str(param("gff")).endswith(".gz")
+GUNZIP_GTF:
+  module: GUNZIP
+  style: file
+  tools:
+  - - gunzip
+    - echo $(gunzip --version 2>&1) | sed 's/^.*(gzip) //; s/ Copyright.*$//'
+  rules:
+  - gunzip
+  when: str(param("gtf")).endswith(".gz")
+GUNZIP_TSS_BED:
+  module: GUNZIP
+  style: file
+  tools:
+  - - gunzip
+    - echo $(gunzip --version 2>&1) | sed 's/^.*(gzip) //; s/ Copyright.*$//'
+  rules:
+  - gunzip
+  when: str(param("tss_bed")).endswith(".gz")
+HOMER_ANNOTATEPEAKS:
+  module: HOMER_ANNOTATEPEAKS
+  style: file
+  tools:
+  - - homer
+    - echo 4.11
+  rules:
+  - homer_annotatepeaks
+  - homer_annotatepeaks_consensus
+IGV:
+  module: IGV
+  style: file
+  tools:
+  - - python
+    - python --version | sed 's/Python //g'
+  rules:
+  - igv
+KHMER_UNIQUEKMERS:
+  module: KHMER_UNIQUEKMERS
+  style: file
+  tools:
+  - - khmer
+    - ' unique-kmers.py --version 2>&1 | grep ^khmer | sed ''s/^khmer //;s/ .*$//'' '
+  rules:
+  - khmer_uniquekmers
+MACS2_CALLPEAK:
+  module: MACS2_CALLPEAK
+  style: file
+  tools:
+  - - macs2
+    - macs2 --version | sed -e "s/macs2 //g"
+  rules:
+  - macs2_callpeak
+MACS2_CONSENSUS:
+  module: MACS2_CONSENSUS
+  style: file
+  tools:
+  - - python
+    - python --version | sed 's/Python //g'
+  - - r-base
+    - echo $(R --version 2>&1) | sed 's/^.*R version //; s/ .*$//'
+  rules:
+  - macs2_consensus
+MERGED_LIBRARY_ATAQV_ATAQV:
+  module: ATAQV_ATAQV
+  style: file
+  tools:
+  - - ataqv
+    - ' ataqv --version '
+  rules:
+  - ataqv
+MERGED_LIBRARY_ATAQV_MKARV:
+  module: ATAQV_MKARV
+  style: file
+  tools:
+  - - ataqv
+    - ' ataqv --version '
+  rules:
+  - ataqv_mkarv
+MERGED_LIBRARY_DEEPTOOLS_PLOTFINGERPRINT:
+  module: DEEPTOOLS_PLOTFINGERPRINT
+  style: file
+  tools:
+  - - deeptools
+    - plotFingerprint --version | sed -e "s/plotFingerprint //g"
+  rules:
+  - deeptools_plotfingerprint
+MERGED_LIBRARY_PICARD_COLLECTMULTIPLEMETRICS:
+  module: PICARD_COLLECTMULTIPLEMETRICS
+  style: file
+  tools:
+  - - picard
+    - 'picard CollectMultipleMetrics --version 2>&1 | grep -o ''Version.*'' | cut -f2- -d:'
+  rules:
+  - picard_collectmultiplemetrics_pe
+  - picard_collectmultiplemetrics_se
+MERGED_LIBRARY_PRESEQ_LCEXTRAP:
+  module: PRESEQ_LCEXTRAP
+  style: file
+  tools:
+  - - preseq
+    - 'echo $(preseq 2>&1) | sed ''s/^.*Version: //; s/Usage:.*$//'''
+  rules:
+  - preseq_lcextrap
+MULTIQC:
+  module: MULTIQC
+  style: file
+  tools:
+  - - multiqc
+    - ' multiqc --version | sed -e "s/multiqc, version //g" '
+  rules:
+  - multiqc
+MULTIQC_CUSTOM_PEAKS:
+  module: MULTIQC_CUSTOM_PEAKS
+  style: file
+  tools:
+  - - sed
+    - echo $(sed --version 2>&1) | sed 's/^.*GNU sed) //; s/ .*$//'
+  rules:
+  - multiqc_custom_peaks
+PICARD_MARKDUPLICATES:
+  module: PICARD_MARKDUPLICATES
+  style: file
+  tools:
+  - - picard
+    - 'echo $(picard MarkDuplicates --version 2>&1) | grep -o ''Version:.*'' | cut -f2- -d:'
+  rules:
+  - picard_markduplicates_library
+  - picard_markduplicates_replicate
+PICARD_MERGESAMFILES_LIBRARY:
+  module: PICARD_MERGESAMFILES
+  style: file
+  tools:
+  - - picard
+    - ' echo $(picard MergeSamFiles --version 2>&1) | grep -o ''Version:.*'' | cut -f2- -d:'
+  rules:
+  - picard_mergesamfiles_library
+PICARD_MERGESAMFILES_REPLICATE:
+  module: PICARD_MERGESAMFILES
+  style: file
+  tools:
+  - - picard
+    - ' echo $(picard MergeSamFiles --version 2>&1) | grep -o ''Version:.*'' | cut -f2- -d:'
+  rules:
+  - picard_mergesamfiles_replicate
+PLOT_HOMER_ANNOTATEPEAKS:
+  module: PLOT_HOMER_ANNOTATEPEAKS
+  style: file
+  tools:
+  - - r-base
+    - echo $(R --version 2>&1) | sed 's/^.*R version //; s/ .*$//'
+  rules:
+  - plot_homer_annotatepeaks
+PLOT_MACS2_QC:
+  module: PLOT_MACS2_QC
+  style: file
+  tools:
+  - - r-base
+    - echo $(R --version 2>&1) | sed 's/^.*R version //; s/ .*$//'
+  rules:
+  - plot_macs2_qc
+SAMPLESHEET_CHECK:
+  module: SAMPLESHEET_CHECK
+  style: file
+  tools:
+  - - python
+    - python --version | sed 's/Python //g'
+  rules:
+  - samplesheet_check
+SAMTOOLS_FLAGSTAT:
+  module: SAMTOOLS_FLAGSTAT
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - samtools_flagstat
+SAMTOOLS_IDXSTATS:
+  module: SAMTOOLS_IDXSTATS
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - samtools_idxstats
+SAMTOOLS_INDEX:
+  module: SAMTOOLS_INDEX
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - samtools_index
+SAMTOOLS_SORT:
+  module: SAMTOOLS_SORT
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - samtools_sort_library
+  - samtools_sort_name
+  - samtools_sort_clean
+SAMTOOLS_STATS:
+  module: SAMTOOLS_STATS
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - samtools_stats
+STAR_ALIGN:
+  module: STAR_ALIGN
+  style: file
+  tools:
+  - - star
+    - STAR --version | sed -e "s/STAR_//g"
+  rules:
+  - star_align
+STAR_GENOMEGENERATE:
+  module: STAR_GENOMEGENERATE
+  style: file
+  tools:
+  - - star
+    - STAR --version | sed -e "s/STAR_//g"
+  rules:
+  - star_genomegenerate
+SUBREAD_FEATURECOUNTS:
+  module: SUBREAD_FEATURECOUNTS
+  style: file
+  tools:
+  - - subread
+    - ' echo $(featureCounts -v 2>&1) | sed -e "s/featureCounts v//g"'
+  rules:
+  - featurecounts
+TRIMGALORE:
+  module: TRIMGALORE
+  style: file
+  tools:
+  - - trimgalore
+    - echo $(trim_galore --version 2>&1) | sed 's/^.*version //; s/Last.*$//'
+  - - cutadapt
+    - cutadapt --version
+  rules:
+  - trimgalore_pe
+  - trimgalore_se
+TSS_EXTRACT:
+  module: TSS_EXTRACT
+  style: file
+  tools:
+  - - sed
+    - echo $(sed --version 2>&1) | sed 's/^.*GNU sed) //; s/ .*$//'
+  rules:
+  - tss_extract
+UCSC_BEDGRAPHTOBIGWIG:
+  module: UCSC_BEDGRAPHTOBIGWIG
+  style: file
+  tools:
+  - - ucsc
+    - echo 445
+  rules:
+  - ucsc_bedgraphtobigwig
+UNTAR_BOWTIE2_INDEX:
+  module: UNTAR
+  style: file
+  tools:
+  - - untar
+    - echo $(tar --version 2>&1) | sed 's/^.*(GNU tar) //; s/ Copyright.*$//'
+  rules:
+  - untar
+  when: ALIGNER == "bowtie2" and str(param("bowtie2_index")).endswith(".tar.gz")
+UNTAR_BWA_INDEX:
+  module: UNTAR
+  style: file
+  tools:
+  - - untar
+    - echo $(tar --version 2>&1) | sed 's/^.*(GNU tar) //; s/ Copyright.*$//'
+  rules:
+  - untar
+  when: ALIGNER == "bwa" and str(param("bwa_index")).endswith(".tar.gz")
+UNTAR_STAR_INDEX:
+  module: UNTAR
+  style: file
+  tools:
+  - - untar
+    - echo $(tar --version 2>&1) | sed 's/^.*(GNU tar) //; s/ Copyright.*$//'
+  rules:
+  - untar
+  when: ALIGNER == "star" and str(param("star_index")).endswith(".tar.gz")

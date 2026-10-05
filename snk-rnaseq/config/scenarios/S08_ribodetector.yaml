@@ -1,0 +1,7 @@
+# --ribo_removal_tool ribodetector (CPU), as in tests/gpu_ribodetector.nf.test
+# without the GPU, plus the alignment steps.
+remove_ribo_rna: true
+ribo_removal_tool: ribodetector
+skip_qc: true
+skip_stringtie: true
+skip_bigwig: true

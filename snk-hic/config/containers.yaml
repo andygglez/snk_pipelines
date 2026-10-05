@@ -2,6 +2,8 @@
 # Images are the ones nf-core/hic 2.1.0 pins, downloaded from
 # https://depot.galaxyproject.org/singularity/ into containers/.
 containers:
+  # CUSTOM_DUMPSOFTWAREVERSIONS (its python/yaml versions; the rule itself runs on the host)
+  dumpsoftwareversions: containers/depot.galaxyproject.org-singularity-multiqc-1.14--pyhdfd78af_0.img
   # SAMPLESHEET_CHECK
   python: containers/depot.galaxyproject.org-singularity-python-3.8.3.img
   # BOWTIE2_BUILD
@@ -36,6 +38,7 @@ containers:
 # `pipeline pull <name>` downloads any missing image from here; it has no
 # effect on runs. Compute nodes are offline, so pull on a login node first.
 container_urls:
+  dumpsoftwareversions: https://depot.galaxyproject.org/singularity/multiqc:1.14--pyhdfd78af_0
   python: https://depot.galaxyproject.org/singularity/python:3.8.3
   bowtie2: https://depot.galaxyproject.org/singularity/bowtie2:2.4.4--py39hbb4e92a_0
   bowtie2_samtools: https://depot.galaxyproject.org/singularity/mulled-v2-ac74a7f02cebcfcc07d8e8d1d750af9c83b4d45a:a0ffedb52808e102887f6ce600d092675bf3528a-0

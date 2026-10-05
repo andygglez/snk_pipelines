@@ -1,0 +1,9 @@
+# Sylph contaminant screening on raw reads (no nf-core pipeline test; the db is
+# sketched from the test genome with `sylph sketch`, the taxonomy is the
+# nf-core/taxprofiler test file). sylph_db / sylph_taxonomy are set by the
+# cluster copy of this file.
+skip_alignment: true
+contaminant_screening: sylph
+contaminant_screening_input: raw
+sylph_db: "testdata/sylph/genome.syldb"
+sylph_taxonomy: "https://github.com/nf-core/test-datasets/raw/taxprofiler/data/database/sylph/test_taxonomy.tsv.gz"

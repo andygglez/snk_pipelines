@@ -10,9 +10,8 @@
 # Ported: the whole workflow, with all four aligners (bwa, bowtie2, chromap,
 # star), MACS3 broad/narrow peaks, HOMER annotation, consensus peaks,
 # featureCounts, DESeq2 QC, IGV session and MultiQC.
-# Not ported (rejected at start-up): iGenomes (`genome`), a .tar.gz chromap index.
-# Not produced: Nextflow run metadata (pipeline_info execution reports, software
-# versions YAML, MultiQC workflow summary / versions sections).
+# Not produced: Nextflow run metadata (pipeline_info execution reports, MultiQC
+# workflow summary section). Software versions are collected by software_versions.
 #
 # Rules run in shadow directories with their inputs linked under the file names
 # Nextflow stages, so file names embedded in outputs (BAM @PG lines, samtools
@@ -31,6 +30,50 @@ from collections import Counter, OrderedDict
 
 configfile: "config/config.yaml"
 configfile: "config/containers.yaml"
+
+# -----------------------------------------------------------------------------
+# iGenomes (main.nf getGenomeAttribute): with `genome`, every parameter left
+# empty is filled from config/igenomes.yaml (conf/igenomes.config). nf-core reads
+# s3://ngi-igenomes directly; here the default base is the public HTTPS mirror,
+# which serves single files only, so iGenomes index *directories* are only used
+# when igenomes_base is a local mirror (otherwise the index is built locally).
+# -----------------------------------------------------------------------------
+IGENOMES_ATTRS = {"fasta": "fasta", "bwa_index": "bwa", "bowtie2_index": "bowtie2", "chromap_index": "chromap", "star_index": "star", "gtf": "gtf", "gff": "gff", "gene_bed": "gene_bed", "blacklist": "blacklist"}
+
+
+def apply_igenomes():
+    import yaml as _yaml
+
+    genome = config.get("genome")
+    if not genome:
+        return None
+    genomes = {} if config.get("igenomes_ignore") else _yaml.safe_load(
+        open(os.path.join(workflow.basedir, "config/igenomes.yaml")))
+    if genome not in genomes:
+        raise ValueError(f"Genome {genome!r} not found in config/igenomes.yaml. Currently available: "
+                         f"{', '.join(genomes)}")
+    base = str(config.get("igenomes_base") or "s3://ngi-igenomes/igenomes/").rstrip("/")
+    if base.startswith("s3://ngi-igenomes/"):
+        base = "https://ngi-igenomes.s3.amazonaws.com/" + base[len("s3://ngi-igenomes/"):]
+    attrs = genomes[genome]
+    for param, key in IGENOMES_ATTRS.items():
+        if config.get(param) not in (None, "") or key not in attrs:
+            continue
+        value = attrs[key]
+        if isinstance(value, str):
+            value = value.format(igenomes_base=base, project_dir=workflow.basedir)
+            if value.endswith("/") and re.match(r"^(https?|ftp)://", value):
+                print(f"WARNING: iGenomes {key} index {value} is a remote directory; it will be built "
+                      "locally instead (set igenomes_base to a local iGenomes mirror to use it).",
+                      file=sys.stderr)
+                continue
+            value = value.rstrip("/") if value.endswith("/") else value
+        config[param] = value
+    return attrs
+
+
+IGENOME = apply_igenomes()
+
 
 SCRIPTS = os.path.join(workflow.basedir, "scripts")
 ASSETS = os.path.join(workflow.basedir, "assets")
@@ -151,16 +194,12 @@ def read_text(path):
 ALIGNER = config["aligner"]
 if ALIGNER not in ("bwa", "bowtie2", "chromap", "star"):
     raise ValueError(f"aligner must be bwa, bowtie2, chromap or star (got {ALIGNER!r}).")
-if param("genome"):
-    raise ValueError("iGenomes (`genome`) is not ported to snk-chipseq; give `fasta` and `gtf` explicitly.")
 if not param("fasta"):
     raise ValueError("`fasta` is required.")
 if not param("gtf") and not param("gff"):
     raise ValueError("No GTF or GFF3 annotation specified (`gtf` or `gff`).")
 if not param("macs_gsize") and not param("read_length"):
     raise ValueError("Either `macs_gsize` or `read_length` (for khmer unique-kmers) is required.")
-if param("chromap_index") and str(config["chromap_index"]).endswith(".tar.gz"):
-    raise ValueError("A .tar.gz chromap index (UNTARFILES) is not ported; give the .index file.")
 
 NARROW = flag("narrow_peak")
 PEAK_TYPE = "narrow_peak" if NARROW else "broad_peak"
@@ -232,11 +271,25 @@ def index_path(key, built):
     return value
 
 
+# A .tar.gz chromap index goes through UNTARFILES (no strip, default
+# publishDir <outdir>/untarfiles/<archive name>/); chromap uses the file inside.
+CHROMAP_TAR = None
+
+
+def chromap_index_path():
+    global CHROMAP_TAR
+    value = param("chromap_index")
+    if value and str(value).endswith(".tar.gz"):
+        CHROMAP_TAR = stage(value)
+        return f"{O}/untarfiles/{os.path.basename(value)[: -len('.tar.gz')]}"
+    return index_path("chromap_index", f"{O}/genome/index/chromap/{basename_noext(FASTA)}.index")
+
+
 INDEX = {
     "bwa": lambda: index_path("bwa_index", f"{INDEX_DIR}/bwa"),
     "bowtie2": lambda: index_path("bowtie2_index", f"{INDEX_DIR}/bowtie2"),
     # CHROMAP_INDEX publishes to genome/index/chromap regardless of save_reference
-    "chromap": lambda: index_path("chromap_index", f"{O}/genome/index/chromap/{basename_noext(FASTA)}.index"),
+    "chromap": lambda: chromap_index_path(),
     "star": lambda: index_path("star_index", f"{INDEX_DIR}/star"),
 }[ALIGNER]()
 
@@ -542,7 +595,7 @@ def all_outputs(wc):
 
 rule all:
     input:
-        all_outputs,
+        lambda wc: all_outputs(wc) + [VERSIONS_YML],
 
 
 localrules:
@@ -718,6 +771,26 @@ rule untar:
             tar -C {output} -xavf {input} --no-same-owner
         fi
         """
+
+
+if CHROMAP_TAR:
+
+    # UNTARFILES (chromap .tar.gz index)
+    rule untarfiles_chromap:
+        input:
+            CHROMAP_TAR,
+        output:
+            directory(INDEX),
+        container:
+            container_path("ubuntu20")
+        threads: res("process_single")["threads"]
+        resources:
+            mem_mb=res("process_single")["mem_mb"],
+        shell:
+            """
+            mkdir -p {output}
+            tar -C {output} -xavf {input}
+            """
 
 
 # BWA_INDEX
@@ -1148,10 +1221,16 @@ rule chromap:
     shell:
         """
         {params.link}
-        ln -s $(realpath {input.index}) {params.index}
+        if [ -d {input.index} ]; then
+            for f in $(find -L {input.index} -type f | sort); do ln -s $(realpath $f) $(basename $f); done
+            idx=$(find -L {input.index} -type f | sort | xargs -n1 basename | tr '\n' ' ')
+        else
+            ln -s $(realpath {input.index}) {params.index}
+            idx={params.index}
+        fi
         ln -s $(realpath {input.fasta}) {FASTA_NAME}
         p={wildcards.lib}.Lb
-        chromap {params.args} -t {threads} -x {params.index} -r {FASTA_NAME} {params.reads} -o $p.sam
+        chromap {params.args} -t {threads} -x $idx -r {FASTA_NAME} {params.reads} -o $p.sam
         samtools addreplacerg {params.args3} -o $p.rg.sam $p.sam
         samtools view -@ {threads} -bh -o $p.bam $p.rg.sam
         rm $p.rg.sam $p.sam
@@ -2439,11 +2518,46 @@ def multiqc_stage_cmd(wc):
     return "\n".join(cmds)
 
 
-# MULTIQC. nf-core also feeds workflow_summary_mqc.yaml and the collated
-# software versions; those are Nextflow run metadata and are not produced here.
+# =============================================================================
+# Software versions (softwareVersionsToYAML + collectFile)
+# =============================================================================
+# config/versions.yaml maps every nf-core process to the port rules that run it
+# and the version commands of its module; each command runs in the image of the
+# rule that ran it. Snakemake replaces Nextflow in the Workflow section.
+VERSIONS_YML = f"{O}/pipeline_info/nf_core_chipseq_software_mqc_versions.yml"
+VERSIONS_MQC = VERSIONS_YML
+
+
+def versions_inputs(wc):
+    """Everything else the run produces, so the DAG is complete when it runs."""
+    # every other output, so every job stays in the DAG the rule reads
+    return [f for f in all_outputs(wc) if f != VERSIONS_YML and not str(f).startswith(f"{O}/multiqc/")]
+
+
+localrules:
+    software_versions,
+
+
+rule software_versions:
+    input:
+        versions_inputs,
+    output:
+        yml=VERSIONS_YML,
+    run:
+        sys.path.insert(0, os.path.join(workflow.basedir, "scripts"))
+        from software_versions import collect, dag_jobs, collect_file, styles, version_chunks, workflow_chunk, write_dump, write_topic
+
+        table = os.path.join(workflow.basedir, "config/versions.yaml")
+        versions = collect(table, dag_jobs(workflow, input), globals())
+        write_topic(versions, "nf-core/chipseq", "v2.1.0", output.yml)
+
+
+# MULTIQC. nf-core also feeds workflow_summary_mqc.yaml (Nextflow run
+# metadata, not produced here).
 rule multiqc:
     input:
         files=multiqc_files,
+        versions=VERSIONS_MQC,
         config=f"{ASSETS}/multiqc_config.yml",
         extra_config=param("multiqc_config") or [],
     output:
@@ -2466,6 +2580,7 @@ rule multiqc:
         mkdir -p stage
         ln -s $(realpath {input.config}) stage/multiqc_config.yml
         {params.stage}
+        mkdir -p stage/versions && ln -s $(realpath {input.versions}) stage/versions/
         cd stage
         multiqc -f {params.title} {params.custom} .
         cd ..

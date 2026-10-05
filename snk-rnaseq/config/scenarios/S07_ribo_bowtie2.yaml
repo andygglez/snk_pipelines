@@ -1,0 +1,7 @@
+# nf-core tests/remove_ribo_rna.nf.test "--ribo_removal_tool bowtie2" (+ save_reference)
+remove_ribo_rna: true
+ribo_removal_tool: bowtie2
+save_reference: true
+skip_qc: true
+skip_stringtie: true
+skip_bigwig: true

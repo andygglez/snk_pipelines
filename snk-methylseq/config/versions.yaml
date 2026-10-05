@@ -1,0 +1,362 @@
+# nf-core process -> port rules (regexes), optional `when` (Python, Snakefile names + any_wc()),
+# module version-reporting style (file = versions.yml, topic = topic channel) and the
+# version commands of its nf-core module. Generated from the pinned nf-core sources;
+# read by the software_versions rule.
+BEDTOOLS_INTERSECT:
+  module: BEDTOOLS_INTERSECT
+  style: file
+  tools:
+  - - bedtools
+    - bedtools --version | sed -e "s/bedtools v//g"
+  rules:
+  - bedtools_intersect
+BISMARK_ALIGN:
+  module: BISMARK_ALIGN
+  style: topic
+  tools:
+  - - bismark
+    - 'bismark --version | grep Version | sed -e "s/Bismark Version: v//" | xargs'
+  rules:
+  - bismark_align_se
+  - bismark_align_pe
+BISMARK_COVERAGE2CYTOSINE:
+  module: BISMARK_COVERAGE2CYTOSINE
+  style: file
+  tools:
+  - - bismark
+    - 'echo $(bismark -v 2>&1) | sed ''s/^.*Bismark Version: v//; s/Copyright.*$//'''
+  rules:
+  - bismark_coverage2cytosine
+BISMARK_DEDUPLICATE:
+  module: BISMARK_DEDUPLICATE
+  style: file
+  tools:
+  - - bismark
+    - 'echo $(bismark -v 2>&1) | sed ''s/^.*Bismark Version: v//; s/Copyright.*$//'''
+  rules:
+  - bismark_deduplicate
+BISMARK_GENOMEPREPARATION_BOWTIE:
+  module: BISMARK_GENOMEPREPARATION
+  style: file
+  tools:
+  - - bismark
+    - 'echo $(bismark -v 2>&1) | sed ''s/^.*Bismark Version: v//; s/Copyright.*$//'''
+  rules:
+  - bismark_genomepreparation
+  when: ALIGNER == "bismark"
+BISMARK_GENOMEPREPARATION_HISAT:
+  module: BISMARK_GENOMEPREPARATION
+  style: file
+  tools:
+  - - bismark
+    - 'echo $(bismark -v 2>&1) | sed ''s/^.*Bismark Version: v//; s/Copyright.*$//'''
+  rules:
+  - bismark_genomepreparation
+  when: ALIGNER == "bismark_hisat"
+BISMARK_METHYLATIONEXTRACTOR:
+  module: BISMARK_METHYLATIONEXTRACTOR
+  style: file
+  tools:
+  - - bismark
+    - 'echo $(bismark -v 2>&1) | sed ''s/^.*Bismark Version: v//; s/Copyright.*$//'''
+  rules:
+  - bismark_methylationextractor
+BISMARK_REPORT:
+  module: BISMARK_REPORT
+  style: file
+  tools:
+  - - bismark
+    - 'echo $(bismark -v 2>&1) | sed ''s/^.*Bismark Version: v//; s/Copyright.*$//'''
+  rules:
+  - bismark_report
+BISMARK_SUMMARY:
+  module: BISMARK_SUMMARY
+  style: file
+  tools:
+  - - bismark
+    - 'echo $(bismark -v 2>&1) | sed ''s/^.*Bismark Version: v//; s/Copyright.*$//'''
+  rules:
+  - bismark_summary
+BWAMETH_ALIGN:
+  module: BWAMETH_ALIGN
+  style: file
+  tools:
+  - - bwameth
+    - bwameth.py --version | cut -f2 -d" "
+  rules:
+  - bwameth_align
+  when: not USE_GPU
+BWAMETH_INDEX:
+  module: BWAMETH_INDEX
+  style: file
+  tools:
+  - - bwameth
+    - bwameth.py --version | cut -f2 -d" "
+  rules:
+  - bwameth_index
+BWA_INDEX:
+  module: BWA_INDEX
+  style: file
+  tools:
+  - - bwa
+    - 'echo $(bwa 2>&1) | sed ''s/^.*Version: //; s/Contact:.*$//'''
+  rules:
+  - bwa_index
+  - bwa_index_versions
+BWA_MEM:
+  module: BWA_MEM
+  style: file
+  tools:
+  - - bwa
+    - 'echo $(bwa 2>&1) | sed ''s/^.*Version: //; s/Contact:.*$//'''
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - bwa_mem
+CAT_FASTQ:
+  module: CAT_FASTQ
+  style: file
+  tools:
+  - - cat
+    - echo $(cat --version 2>&1) | sed 's/^.*coreutils) //; s/ .*$//'
+  rules:
+  - cat_fastq_se
+  - cat_fastq_pe
+FASTQC:
+  module: FASTQC
+  style: topic
+  tools:
+  - - fastqc
+    - fastqc --version | sed "/FastQC v/!d; s/.*v//"
+  rules:
+  - fastqc
+GUNZIP:
+  module: GUNZIP
+  style: file
+  tools:
+  - - gunzip
+    - echo $(gunzip --version 2>&1) | sed 's/^.*(gzip) //; s/ Copyright.*$//'
+  rules:
+  - gunzip_fasta
+METHYLDACKEL_EXTRACT:
+  module: METHYLDACKEL_EXTRACT
+  style: file
+  tools:
+  - - methyldackel
+    - MethylDackel --version 2>&1 | cut -f1 -d" "
+  rules:
+  - methyldackel_extract
+METHYLDACKEL_MBIAS:
+  module: METHYLDACKEL_MBIAS
+  style: file
+  tools:
+  - - methyldackel
+    - MethylDackel --version 2>&1 | cut -f1 -d" "
+  rules:
+  - methyldackel_mbias
+MULTIQC:
+  module: MULTIQC
+  style: topic
+  tools:
+  - - multiqc
+    - multiqc --version | sed "s/.* //g"
+  rules:
+  - multiqc
+  downstream: true  # runs after software_versions; nf-core appends its topic version on completion
+  when: not flag("skip_multiqc")
+PARABRICKS_FQ2BAMMETH:
+  module: PARABRICKS_FQ2BAMMETH
+  style: file
+  tools:
+  - - pbrun
+    - 'echo $(pbrun version 2>&1) | sed ''s/^Please.* //'' '
+  rules:
+  - bwameth_align
+  when: USE_GPU
+PICARD_ADDORREPLACEREADGROUPS:
+  module: PICARD_ADDORREPLACEREADGROUPS
+  style: file
+  tools:
+  - - picard
+    - 'picard AddOrReplaceReadGroups --version 2>&1 | grep -o ''Version:.*'' | cut -f2- -d:'
+  rules:
+  - picard_addorreplacereadgroups
+  when: ALIGNER != "bwamem"
+PICARD_BEDTOINTERVALLIST:
+  module: PICARD_BEDTOINTERVALLIST
+  style: file
+  tools:
+  - - picard
+    - 'echo $(picard BedToIntervalList --version 2>&1) | grep -o ''Version:.*'' | cut -f2- -d:'
+  rules:
+  - picard_bedtointervallist
+PICARD_CREATESEQUENCEDICTIONARY:
+  module: PICARD_CREATESEQUENCEDICTIONARY
+  style: file
+  tools:
+  - - picard
+    - 'picard CreateSequenceDictionary --version 2>&1 | grep -o ''Version:.*'' | cut -f2- -d:'
+  rules:
+  - picard_createsequencedictionary
+PICARD_MARKDUPLICATES:
+  module: PICARD_MARKDUPLICATES
+  style: file
+  tools:
+  - - picard
+    - 'echo $(picard MarkDuplicates --version 2>&1) | grep -o ''Version:.*'' | cut -f2- -d:'
+  rules:
+  - picard_markduplicates
+  when: ALIGNER != "bwamem"
+PRESEQ_LCEXTRAP:
+  module: PRESEQ_LCEXTRAP
+  style: file
+  tools:
+  - - preseq
+    - 'echo $(preseq 2>&1) | sed ''s/^.*Version: //; s/Usage:.*$//'''
+  rules:
+  - preseq_lcextrap
+  when: preseq_succeeded()
+QUALIMAP_BAMQC:
+  module: QUALIMAP_BAMQC
+  style: file
+  tools:
+  - - qualimap
+    - echo $(qualimap 2>&1) | sed 's/^.*QualiMap v.//; s/Built.*$//'
+  rules:
+  - qualimap_bamqc
+  - qualimap_versions
+RASTAIR_CALL:
+  module: RASTAIR_CALL
+  style: file
+  tools:
+  - - rastair
+    - rastair --version
+  rules:
+  - rastair_call
+RASTAIR_MBIAS:
+  module: RASTAIR_MBIAS
+  style: file
+  tools:
+  - - rastair
+    - rastair --version
+  rules:
+  - rastair_mbias
+RASTAIR_MBIASPARSER:
+  module: RASTAIR_MBIASPARSER
+  style: file
+  tools:
+  - - rastair
+    - rastair --version
+  rules:
+  - rastair_mbiasparser
+RASTAIR_METHYLKIT:
+  module: RASTAIR_METHYLKIT
+  style: file
+  tools:
+  - - rastair
+    - rastair --version
+  rules:
+  - rastair_methylkit
+SAMTOOLS_FAIDX:
+  module: SAMTOOLS_FAIDX
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - samtools_faidx
+SAMTOOLS_FLAGSTAT:
+  module: SAMTOOLS_FLAGSTAT
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - samtools_flagstat
+  when: ALIGNER != "bwamem"
+SAMTOOLS_IDXSTATS:
+  module: SAMTOOLS_IDXSTATS
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - samtools_idxstats
+  when: ALIGNER != "bwamem"
+SAMTOOLS_INDEX:
+  module: SAMTOOLS_INDEX
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - samtools_index
+  when: (ALIGNER != "bwameth") and (ALIGNER != "bwamem")
+SAMTOOLS_INDEX_ALIGNMENTS:
+  module: SAMTOOLS_INDEX
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - samtools_index
+  when: ALIGNER == "bwameth"
+SAMTOOLS_INDEX_DEDUPLICATED:
+  module: SAMTOOLS_INDEX
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - samtools_index
+  when: ALIGNER == "bwameth" and not SKIP_DEDUP
+SAMTOOLS_SORT:
+  module: SAMTOOLS_SORT
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed '1!d;s/.* //'
+  rules:
+  - samtools_sort
+SAMTOOLS_STATS:
+  module: SAMTOOLS_STATS
+  style: topic
+  tools:
+  - - samtools
+    - samtools version | sed "1!d;s/.* //"
+  rules:
+  - samtools_stats
+TRIMGALORE:
+  module: TRIMGALORE
+  style: file
+  tools:
+  - - trimgalore
+    - echo $(trim_galore --version 2>&1) | sed 's/^.*version //; s/Last.*$//'
+  - - cutadapt
+    - cutadapt --version
+  - - pigz
+    - ' pigz --version 2>&1 | sed ''s/pigz //g'' '
+  rules:
+  - trimgalore_se
+  - trimgalore_pe
+UNTAR_BISMARK:
+  module: UNTAR
+  style: file
+  tools:
+  - - untar
+    - echo $(tar --version 2>&1) | sed 's/^.*(GNU tar) //; s/ Copyright.*$//'
+  rules:
+  - untar_index
+  when: BISMARK
+UNTAR_BWAMETH:
+  module: UNTAR
+  style: file
+  tools:
+  - - untar
+    - echo $(tar --version 2>&1) | sed 's/^.*(GNU tar) //; s/ Copyright.*$//'
+  rules:
+  - untar_index
+  when: not BISMARK
+# ALIGNER != "bwamem" above: workflows/methylseq mixes FASTQ_ALIGN_DEDUP_BWAMEM's
+# versions with .unique{ it.baseName }; every file is versions.yml, so only
+# the first one (BWA_MEM) reaches the versions file.

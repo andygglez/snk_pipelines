@@ -1,0 +1,8 @@
+# nf-core tests/contaminant_screening_input.nf.test (hisat2 + kraken2 on unmapped reads)
+# + save_unaligned / save_align_intermeds (samplesheet_with_bams.csv). Overlay on test.yaml.
+aligner: hisat2
+skip_bigwig: true
+skip_pseudo_alignment: true
+contaminant_screening: kraken2
+save_unaligned: true
+save_align_intermeds: true

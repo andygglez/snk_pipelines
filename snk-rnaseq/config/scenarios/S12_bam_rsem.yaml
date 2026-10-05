@@ -1,0 +1,4 @@
+# nf-core tests/bam_input.nf.test "BAM input for RSEM"
+input: "config/samplesheet_test_with_rsem_bams.csv"
+skip_alignment: true
+aligner: star_rsem

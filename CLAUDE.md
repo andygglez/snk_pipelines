@@ -148,6 +148,39 @@ A port counts as validated once its test-profile outputs match an nf-core run of
 
 ## Port status
 
+**2026-10-04:** every port now accepts every nf-core parameter of its pinned release. Re-validated on Rorqual on 2026-10-04: all five ports. In every tested scenario the versions file matches nf-core line for line (apart from Nextflow/Snakemake).
+- **All ports:**
+  - iGenomes (`genome`, `igenomes_base`, `igenomes_ignore`; `config/igenomes.yaml` is converted from `conf/igenomes.config`). Index directories need a local `igenomes_base` mirror; otherwise the index is built.
+  - Software versions: a `software_versions` rule writes the nf-core `pipeline_info` versions file and feeds MultiQC. `config/versions.yaml` maps each nf-core process to its port rules and the module's version commands, which run in the rule's image. The Workflow section names Snakemake instead of Nextflow.
+    - The versions file matches nf-core line for line (apart from the Nextflow/Snakemake line) in every rnaseq, chipseq and atacseq scenario.
+    - nf-core details mirrored in `scripts/software_versions.py`: file-style `versions.yml` keeps the module's tool order and goes through SnakeYAML, so `1.20` becomes `1.2` (rnaseq, chipseq, methylseq). Topic-style tools are sorted. `CUSTOM_DUMPSOFTWAREVERSIONS` (atacseq, hic) reads with `yaml.BaseLoader`, so it keeps strings (`'1.17'`), and reports the python/yaml of its multiqc 1.14 image (`dumpsoftwareversions` in `containers.yaml`).
+    - Which processes ran is traced from Snakemake's metadata (`dag_jobs()`: the producing rule and inputs recorded for each output, walked back from the rule's inputs; wildcards come from `rule.get_wildcards`). Snakemake executes a `run:` job in a subprocess whose `workflow.dag` holds only that job, so `workflow.dag.jobs` doesn't work. It only looked right where checkpoints pulled the DAG back in, and methylseq (no checkpoints) came out empty. A `snakemake --dag` dry run doesn't work either: it stops at checkpoints whenever a rerun trigger fires.
+    - The `software_versions` rule therefore depends on every other output, including `pipeline_info/`. Processes that run after it (methylseq MULTIQC, reported through a topic channel) set `downstream: true` and a `when`.
+    - Processes nf-core runs but never reports are left out of `versions.yaml` (chipseq: KHMER_UNIQUEKMERS, MULTIQC_CUSTOM_PHANTOMPEAKQUALTOOLS).
+- **snk-rnaseq** additions:
+  - Every former "not ported yet" option: fastp, UMI handling, rRNA removal, star_rsem / hisat2 / bowtie2_salmon, kallisto, skip_alignment with BAM input, skip_quantification_merge, stringtie_ignore_gtf, contaminant screening, RustQC, bam_csi_index, prokaryotic mode.
+  - Sentieon, Parabricks and GPU RiboDetector: they need a licence or GPU, and `--nv` in `--apptainer-args`.
+  - Scenario overlays in `config/scenarios/S01..S20` mirror nf-core `tests/*.nf.test`. **Validated on Rorqual on 2026-10-04:** all 20 scenarios run in both pipelines, and every nf-core output file exists in the port (extra files in the port: `.snakemake_timestamp` markers only). Logs and comparisons: `claude_jobs/logs/rnaseq_scen/<scenario>.{snk.log,nf.log,compare.txt}`.
+    - Quantification tables, RSEM/Salmon/kallisto results, Kraken2/Sylph reports and samtools stats are identical. StringTie is identical once sorted; with `stringtie_ignore_gtf`, only the `MSTRG.N` numbering differs (threads).
+    - Remaining differences are run-to-run noise: record order from multithreaded tools (STAR, HISAT2, Bowtie2 `-k`, Kraken2, SortMeRNA, RustQC), BBSplit read counts (±2), timestamps (FastQC zips, UMI-tools logs, Salmon logs), RSEM `.theta` at 1e-16, absolute paths in BBSplit index metadata, and the row order of `samplesheet_with_bams.csv` (nf-core uses task-completion order).
+    - nf-core race kept as is: with UMI + STAR, the genome and transcriptome `samtools_stats/<s>.sorted.bam.*` share a name, and nf-core publishes whichever finishes last. The port always publishes the transcriptome stats.
+    - S02 runs star_rsem + Kraken2. Bracken can't be tested: the only test DB is SARS-CoV-2, and nf-core fails on it too.
+    - The cluster runs Python 3.11, so f-strings must not nest the same quote type (3.12 allows it locally). A `run:` block can't call `checkpoints.<x>.get()`; read the checkpoint's JSON output directly.
+  - The 15 new images (and Parabricks, `apptainer pull docker://…`) are not on Rorqual yet. Pull them on the login node.
+- **snk-rnaseq** also mirrors PREPARE_GENOME_REFERENCES/INDICES (`nfcore_prepared()`): it builds or untars every reference nf-core makes from the params alone, even unused ones (gene BED, FASTA index, STAR/BBSplit index with BAM input, salmon/kallisto/kraken tarballs). With paired-end Bowtie2 rRNA removal, SAMTOOLS_VIEW/SAMTOOLS_FASTQ run as separate rules in the samtools image, as in nf-core.
+- **snk-chipseq:** accepts a `.tar.gz` chromap index (UNTARFILES). Re-validated on 2026-10-04: test/A/B/D re-run from scratch with the new code show the same verdicts as the 2026-10-02 validation (only HOMER tie-breaks move). The old `results_A` trees held leftover preseq files from a first attempt; the fresh run correctly has none.
+- **snk-methylseq:** re-validated on 2026-10-04. test plus A–I re-run from scratch: identical inventories, and the same differing files as on 2026-10-03 apart from FastQC report dates. `multiqc_software_versions.txt` now exists. Versions-file quirks mirrored:
+    - bwamem: FASTQ_ALIGN_DEDUP_BWAMEM versions go through `.unique{ it.baseName }`, so only BWA_MEM survives.
+    - A failed (ignored) Preseq reports nothing.
+    - A `.gz` FASTA is gunzipped even when the indices are given.
+- **snk-atacseq:** re-validated on 2026-10-04. test/test_controls/with_control re-run from scratch: identical inventories and the same differing-file set as on 2026-10-02 (plus MultiQC plotFingerprint data, whose row order varies).
+- **snk-methylseq:** `use_gpu` (Parabricks fq2bam_meth); Qualimap `-gd` comes from `genome`.
+- **snk-hic:** output names and paths now match nf-core (the four items listed below are fixed). Re-validated on 2026-10-04: all 107 nf-core files are present, and every contact matrix is identical by `cooler dump` (all resolutions, plus the TAD z-score matrix). The port still publishes 16 extra intermediates (chunk mapstat/pairstat/RSstat and bowtie2 logs under `hicpro/`, plus `logs/` and `work/`). SAMPLESHEET_CHECK is left out of `versions.yaml`, because INPUT_CHECK emits no versions in nf-core/hic 2.1.0. The no-op params `skip_maps` / `skip_balancing` / `skip_mcool` / `multiqc_title` were added.
+- **Dev tools for rnaseq:**
+  - The Snakefile is assembled from `~/.claude/jobs/rnaseq_ext/wip_parts/` (`assemble.sh`; `dryrun.sh` fakes the checkpoints so dry runs resolve).
+  - Cluster staging: `~/.claude/jobs/rnaseq_ext/make_stage.py` + `stage/run_rnaseq_scenarios.sh`.
+  - nf-core sources for the other ports: `~/.claude/jobs/nfsrc/`.
+
 - **snk-hic** (nf-core/hic 2.1.0): validated on Rorqual on 2026-10-02, with outputs identical to nf-core. Still open: a few output names and paths differ from nf-core:
   - distance decay: `<sample>.<res>_distcount.*` → `<sample>_distcount.*`
   - FastQC: `<sample>_0_{1,2}_fastqc.*` → `<sample>_{1,2}_fastqc.*`

@@ -1,9 +1,10 @@
 # Singularity images used by each rule. Paths are relative to snk-atacseq/ (or absolute).
 # Each is the image the matching nf-core/atacseq 2.1.2 module pins
 # (modules/*/main.nf, https singularity URL), downloaded into containers/.
-# Not listed: UMITOOLS_EXTRACT (atacseq never runs UMI extraction) and
-# CUSTOM_DUMPSOFTWAREVERSIONS (multiqc 1.14; software versions are not produced).
+# Not listed: UMITOOLS_EXTRACT (atacseq never runs UMI extraction).
 containers:
+  # CUSTOM_DUMPSOFTWAREVERSIONS (its python/yaml versions; the rule itself runs on the host)
+  dumpsoftwareversions: containers/depot.galaxyproject.org-singularity-multiqc-1.14--pyhdfd78af_0.img
   # SAMPLESHEET_CHECK, GET_AUTOSOMES, IGV
   python: containers/depot.galaxyproject.org-singularity-python-3.8.3.img
   # GUNZIP_*, UNTAR_*, TSS_EXTRACT, MULTIQC_CUSTOM_PEAKS
@@ -75,6 +76,7 @@ containers:
 # `pipeline pull <name>` downloads any missing image from here; it has no
 # effect on runs. Compute nodes are offline, so pull on a login node first.
 container_urls:
+  dumpsoftwareversions: https://depot.galaxyproject.org/singularity/multiqc:1.14--pyhdfd78af_0
   python: https://depot.galaxyproject.org/singularity/python:3.8.3
   ubuntu20: https://depot.galaxyproject.org/singularity/ubuntu:20.04
   gffread: https://depot.galaxyproject.org/singularity/gffread:0.12.1--h8b12597_0

@@ -1,0 +1,4 @@
+# nf-core tests/skip_qc.nf.test "all samples below mapped reads threshold with de novo StringTie"
+skip_qc: true
+min_mapped_reads: 100
+stringtie_ignore_gtf: true

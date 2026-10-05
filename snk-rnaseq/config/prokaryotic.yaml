@@ -1,0 +1,11 @@
+# nf-core/rnaseq 3.27.0 conf/prokaryotic.config (profile `prokaryotic`) as a
+# config overlay: snakemake --configfile config/prokaryotic.yaml ...
+prokaryotic: true
+gffread_transcript_fasta: true
+aligner: bowtie2_salmon
+featurecounts_feature_type: CDS
+rseqc_modules: "bam_stat,infer_experiment,read_duplication"
+skip_dupradar: true
+skip_qualimap: true
+skip_bigwig: true
+skip_stringtie: true

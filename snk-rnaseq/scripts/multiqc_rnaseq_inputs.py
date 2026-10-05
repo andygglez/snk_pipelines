@@ -8,6 +8,9 @@ Mirrors subworkflows/local/multiqc_rnaseq (merged-report branch):
   strand_check_composition_mqc.json strandCheckCompositionYaml
   multiqc_sample_merge.yml         multiqcSampleMergeYaml
   name_replacement.txt             multiqcNameReplacements
+With --per-sample (skip_quantification_merge) it also writes, for each sample,
+<id>_fail_trimmed_samples_mqc.tsv / <id>_fail_mapped_samples_mqc.tsv (failing
+samples only) and <id>_strand_check_{summary,composition}_mqc.json.
 Files that nf-core would not create (no rows) are not written.
 """
 
@@ -99,6 +102,38 @@ def sample_merge_yaml(rows):
     return f'table_sample_merge:\n  "Read 1":\n{r1}\n  "Read 2":\n{r2}\n'
 
 
+def write_strand_files(rows, summary_static, comp_static, summary_out, composition_out):
+    """strandCheckSummaryYaml + strandCheckCompositionYaml for the given rows."""
+    header_keys = list(summary_static["headers"].keys())
+    data = {}
+    for sample, provided, status, salmon, rseqc in rows:
+        raw = summary_cells(provided, status, salmon, rseqc)
+        unknown = set(raw) - set(header_keys)
+        if unknown:
+            sys.exit(f"strand_check_summary.yaml headers do not declare columns: {unknown}")
+        data[sample] = {k: raw[k] for k in header_keys if raw.get(k) is not None}
+    with open(summary_out, "w") as fh:
+        json.dump({**summary_static, "data": data}, fh, indent=4)
+
+    comp = dict(comp_static)
+    rseqc_data = {s: composition(r) for s, _, _, _, r in rows if r}
+    salmon_data = {s: composition(sa) for s, _, _, sa, _ in rows if sa}
+    datasets, labels = [], []
+    if rseqc_data:
+        datasets.append(rseqc_data)
+        labels.append("RSeQC")
+    if salmon_data:
+        datasets.append(salmon_data)
+        labels.append("Salmon")
+    pconfig = dict(comp["pconfig"])
+    if len(datasets) > 1:
+        pconfig["data_labels"] = [{"name": lab, "ylab": pconfig.get("ylab")} for lab in labels]
+    comp["pconfig"] = pconfig
+    comp["data"] = datasets[0] if len(datasets) == 1 else datasets
+    with open(composition_out, "w") as fh:
+        json.dump(comp, fh, indent=4)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--samplesheet", required=True)
@@ -114,6 +149,7 @@ def main():
     ap.add_argument("--summary-asset", required=True)
     ap.add_argument("--composition-asset", required=True)
     ap.add_argument("--status-header", required=True)
+    ap.add_argument("--per-sample", action="store_true")
     ap.add_argument("--outdir", required=True)
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
@@ -127,6 +163,9 @@ def main():
         st = load_json(f)
         if st["num_reads"] is not None and st["num_reads"] <= args.min_trimmed_reads:
             failed.append(f"{st['sample']}\t{java_double_str(st['num_reads'])}")
+            if args.per_sample:
+                with open(out(f"{st['sample']}_fail_trimmed_samples_mqc.tsv"), "w") as fh:
+                    fh.write(f"Sample\tReads after trimming\n{failed[-1]}\n")
     if failed:
         with open(out("fail_trimmed_samples_mqc.tsv"), "w") as fh:
             fh.write("Sample\tReads after trimming\n" + "".join(r + "\n" for r in sorted(failed)))
@@ -139,6 +178,9 @@ def main():
         st = load_json(f)
         if st["pass"] is False:
             failed.append(f"{st['sample']}\t{java_float_str(st['percent_mapped'])}")
+            if args.per_sample:
+                with open(out(f"{st['sample']}_fail_mapped_samples_mqc.tsv"), "w") as fh:
+                    fh.write(status_header + f"Sample\t{args.aligner_display_name} (%)\n{failed[-1]}\n")
     if failed:
         with open(out("fail_mapped_samples_mqc.tsv"), "w") as fh:
             fh.write(status_header + f"Sample\t{args.aligner_display_name} (%)\n")
@@ -162,37 +204,17 @@ def main():
 
     if rows:
         summary_static = load_asset(args.summary_asset)
-        header_keys = list(summary_static["headers"].keys())
-        data = {}
-        for sample, provided, status, salmon, rseqc in rows:
-            raw = summary_cells(provided, status, salmon, rseqc)
-            unknown = set(raw) - set(header_keys)
-            if unknown:
-                sys.exit(f"strand_check_summary.yaml headers do not declare columns: {unknown}")
-            data[sample] = {k: raw[k] for k in header_keys if raw.get(k) is not None}
-        with open(out("strand_check_summary_mqc.json"), "w") as fh:
-            json.dump({**summary_static, "data": data}, fh, indent=4)
-
         comp_static = load_asset(args.composition_asset)
         for k in ("parent_id", "parent_name", "parent_description"):
             if k in summary_static:
                 comp_static[k] = summary_static[k]
-        rseqc_data = {s: composition(r) for s, _, _, _, r in rows if r}
-        salmon_data = {s: composition(sa) for s, _, _, sa, _ in rows if sa}
-        datasets, labels = [], []
-        if rseqc_data:
-            datasets.append(rseqc_data)
-            labels.append("RSeQC")
-        if salmon_data:
-            datasets.append(salmon_data)
-            labels.append("Salmon")
-        pconfig = dict(comp_static["pconfig"])
-        if len(datasets) > 1:
-            pconfig["data_labels"] = [{"name": lab, "ylab": pconfig.get("ylab")} for lab in labels]
-        comp_static["pconfig"] = pconfig
-        comp_static["data"] = datasets[0] if len(datasets) == 1 else datasets
-        with open(out("strand_check_composition_mqc.json"), "w") as fh:
-            json.dump(comp_static, fh, indent=4)
+        write_strand_files(rows, summary_static, comp_static, out("strand_check_summary_mqc.json"),
+                           out("strand_check_composition_mqc.json"))
+        if args.per_sample:
+            for row in rows:
+                write_strand_files([row], summary_static, comp_static,
+                                   out(f"{row[0]}_strand_check_summary_mqc.json"),
+                                   out(f"{row[0]}_strand_check_composition_mqc.json"))
 
     # Samplesheet-derived files: first run of each sample
     first_run = {}

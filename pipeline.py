@@ -174,6 +174,13 @@ def cmd_pull(args):
         if args.dry_run:
             continue
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        if url.startswith("docker://"):
+            # Docker-only images (e.g. Parabricks) are converted by apptainer.
+            rc = subprocess.call(["apptainer", "pull", path, url])
+            if rc != 0:
+                print(f"    failed: apptainer pull exited with {rc}")
+                failed.append(key)
+            continue
         part = path + ".part"
         try:
             # community-cr-prod.seqera.io (Cloudflare) answers 403 to urllib's

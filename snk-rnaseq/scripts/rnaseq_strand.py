@@ -6,6 +6,9 @@ Ported functions, with the nf-core source they mirror:
   inferexperiment_strandedness utils_nfcore_rnaseq_pipeline: getInferexperimentStrandedness
   trimgalore_reads_after_filtering fastq_fastqc_umitools_trimgalore: getTrimGaloreReadsAfterFiltering
   star_percent_mapped         align_star: getStarPercentMapped
+  bowtie2_percent_mapped      align_bowtie2: getBowtie2PercentMapped
+  fastp_reads_after_filtering fastq_fastqc_umitools_fastp: getFastpReadsAfterFiltering
+  seqkit_read_length          fastq_remove_rrna: getReadLengthFromSeqkitStats
 
 Groovy's `toFloat()` truncates to 32-bit precision before the value is promoted
 to double, so f32() is applied at the same points to reproduce nf-core's numbers.
@@ -122,6 +125,35 @@ def star_percent_mapped(log_final):
             if m:
                 percent = f32(m.group(1))
     return percent
+
+
+def bowtie2_percent_mapped(log):
+    percent = 0.0
+    with open(log) as fh:
+        for line in fh:
+            m = re.search(r"(\d+\.\d+)% overall alignment rate", line)
+            if m:
+                percent = f32(m.group(1))
+    return percent
+
+
+def fastp_reads_after_filtering(json_file):
+    with open(json_file) as fh:
+        return int(json.load(fh)["summary"]["after_filtering"]["total_reads"])
+
+
+def seqkit_read_length(stats_file):
+    """Mean avg_len over the files in a `seqkit stats --tabular` table (Math.round)."""
+    with open(stats_file) as fh:
+        lines = fh.read().splitlines()
+    if len(lines) < 2:
+        return 100
+    header = lines[0].split("\t")
+    if "avg_len" not in header:
+        return 100
+    idx = header.index("avg_len")
+    lens = [f32(line.split("\t")[idx]) for line in lines[1:]]
+    return int(math.floor(f32(sum(lens) / len(lens)) + 0.5))
 
 
 def classify_strand(strand_status, infer_experiment_txt, stranded_threshold, unstranded_threshold):

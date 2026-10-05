@@ -1,0 +1,4 @@
+# nf-core tests/skip_trimming.nf.test (--skip_trimming --stringtie_ignore_gtf) + bam_csi_index
+skip_trimming: true
+stringtie_ignore_gtf: true
+bam_csi_index: true

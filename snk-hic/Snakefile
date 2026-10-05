@@ -12,10 +12,56 @@
 import csv
 import glob
 import os
+import re
+import sys
 from collections import OrderedDict
 
 configfile: "config/config.yaml"
 configfile: "config/containers.yaml"
+
+# -----------------------------------------------------------------------------
+# iGenomes (main.nf getGenomeAttribute): with `genome`, every parameter left
+# empty is filled from config/igenomes.yaml (conf/igenomes.config). nf-core reads
+# s3://ngi-igenomes directly; here the default base is the public HTTPS mirror,
+# which serves single files only, so iGenomes index *directories* are only used
+# when igenomes_base is a local mirror (otherwise the index is built locally).
+# -----------------------------------------------------------------------------
+IGENOMES_ATTRS = {"fasta": "fasta", "bwt2_index": "bowtie2"}
+
+
+def apply_igenomes():
+    import yaml as _yaml
+
+    genome = config.get("genome")
+    if not genome:
+        return None
+    genomes = {} if config.get("igenomes_ignore") else _yaml.safe_load(
+        open(os.path.join(workflow.basedir, "config/igenomes.yaml")))
+    if genome not in genomes:
+        raise ValueError(f"Genome {genome!r} not found in config/igenomes.yaml. Currently available: "
+                         f"{', '.join(genomes)}")
+    base = str(config.get("igenomes_base") or "s3://ngi-igenomes/igenomes/").rstrip("/")
+    if base.startswith("s3://ngi-igenomes/"):
+        base = "https://ngi-igenomes.s3.amazonaws.com/" + base[len("s3://ngi-igenomes/"):]
+    attrs = genomes[genome]
+    for param, key in IGENOMES_ATTRS.items():
+        if config.get(param) not in (None, "") or key not in attrs:
+            continue
+        value = attrs[key]
+        if isinstance(value, str):
+            value = value.format(igenomes_base=base, project_dir=workflow.basedir)
+            if value.endswith("/") and re.match(r"^(https?|ftp)://", value):
+                print(f"WARNING: iGenomes {key} index {value} is a remote directory; it will be built "
+                      "locally instead (set igenomes_base to a local iGenomes mirror to use it).",
+                      file=sys.stderr)
+                continue
+            value = value.rstrip("/") if value.endswith("/") else value
+        config[param] = value
+    return attrs
+
+
+IGENOME = apply_igenomes()
+
 
 SCRIPTS = os.path.join(workflow.basedir, "scripts")
 O = config["outdir"].rstrip("/")
@@ -161,11 +207,11 @@ COOLDIR = f"{O}/contact_maps/cool"
 # Targets
 # -----------------------------------------------------------------------------
 def all_outputs(wc):
-    out = [f"{O}/pipeline_info/samplesheet.valid.csv"]
+    out = [f"{O}/samplesheet/samplesheet.valid.csv"]
     for s in SAMPLES:
         for c in chunks(s):
-            out += expand(f"{O}/fastqc/{s}_{c}_{{r}}_fastqc.{{ext}}", r=[1, 2], ext=["html", "zip"])
-            out.append(f"{MAPDIR}/{s}/{s}_{c}_bwt2pairs.bam")
+            out.append(f"{MAPDIR}/{s}_{c}_bwt2pairs.bam")
+        out += expand(f"{O}/fastqc/{s}_{{r}}_fastqc.{{ext}}", r=[1, 2], ext=["html", "zip"])
         out += [
             f"{VPDIR}/{s}.allValidPairs",
             f"{VPDIR}/pairix/{s}_contacts.pairs.gz",
@@ -185,7 +231,8 @@ def all_outputs(wc):
             out += expand(f"{O}/contact_maps/txt/{s}.{{res}}_raw.txt", res=MAP_RES)
         if config["hicpro_maps"]:
             out += expand(f"{O}/hicpro/matrix/iced/{s}.{{res}}_iced.matrix", res=MAP_RES)
-        out += expand(f"{O}/distance_decay/{s}.{{res}}_distcount.png", res=RES_DIST_DECAY)
+        if RES_DIST_DECAY:
+            out.append(f"{O}/distance_decay/{s}_distcount.png")
         out += expand(f"{O}/compartments/{s}.{{res}}_compartments.cis.vecs.tsv", res=RES_COMPARTMENTS)
         if "insulation" in TADS_CALLER:
             out += expand(f"{O}/tads/insulation/{s}.{{res}}_balanced_insulation.tsv", res=RES_TADS)
@@ -199,7 +246,7 @@ def all_outputs(wc):
 
 rule all:
     input:
-        all_outputs,
+        lambda wc: all_outputs(wc) + [VERSIONS_YML],
 
 
 # =============================================================================
@@ -226,7 +273,7 @@ rule samplesheet_check:
     input:
         config["input"],
     output:
-        f"{O}/pipeline_info/samplesheet.valid.csv",
+        f"{O}/samplesheet/samplesheet.valid.csv",
     container:
         container_path("python")
     threads: res("single")["threads"]
@@ -326,16 +373,18 @@ rule get_restriction_fragments:
 # QC
 # =============================================================================
 
-# FASTQC (files are named <sample>_<chunk>_{1,2} so chunks do not overwrite each other)
+# FASTQC (prefix meta.id). nf-core runs it on every chunk and all chunks of a
+# sample publish the same <sample>_{1,2}_fastqc.* (the last one written wins);
+# here each chunk is checked in the work area and the last chunk is published.
 rule fastqc:
     input:
         r1=lambda wc: chunk_pairs(wc.sample)[int(wc.chunk)][0],
         r2=lambda wc: chunk_pairs(wc.sample)[int(wc.chunk)][1],
     output:
-        html1=f"{O}/fastqc/{{sample}}_{{chunk}}_1_fastqc.html",
-        zip1=f"{O}/fastqc/{{sample}}_{{chunk}}_1_fastqc.zip",
-        html2=f"{O}/fastqc/{{sample}}_{{chunk}}_2_fastqc.html",
-        zip2=f"{O}/fastqc/{{sample}}_{{chunk}}_2_fastqc.zip",
+        html1=f"{O}/work/fastqc/{{sample}}/{{chunk}}/{{sample}}_1_fastqc.html",
+        zip1=f"{O}/work/fastqc/{{sample}}/{{chunk}}/{{sample}}_1_fastqc.zip",
+        html2=f"{O}/work/fastqc/{{sample}}/{{chunk}}/{{sample}}_2_fastqc.html",
+        zip2=f"{O}/work/fastqc/{{sample}}/{{chunk}}/{{sample}}_2_fastqc.zip",
     container:
         container_path("fastqc")
     threads: res("medium")["threads"]
@@ -346,13 +395,24 @@ rule fastqc:
     shell:
         """
         tmp=$(mktemp -d)
-        ln -s $(realpath {input.r1}) $tmp/{wildcards.sample}_{wildcards.chunk}_1.fastq.gz
-        ln -s $(realpath {input.r2}) $tmp/{wildcards.sample}_{wildcards.chunk}_2.fastq.gz
+        ln -s $(realpath {input.r1}) $tmp/{wildcards.sample}_1.fastq.gz
+        ln -s $(realpath {input.r2}) $tmp/{wildcards.sample}_2.fastq.gz
         fastqc --threads {threads} -o $(dirname {output.html1}) \
-            $tmp/{wildcards.sample}_{wildcards.chunk}_1.fastq.gz \
-            $tmp/{wildcards.sample}_{wildcards.chunk}_2.fastq.gz > {log} 2>&1
+            $tmp/{wildcards.sample}_1.fastq.gz $tmp/{wildcards.sample}_2.fastq.gz > {log} 2>&1
         rm -rf $tmp
         """
+
+
+rule fastqc_publish:
+    input:
+        lambda wc: f"{O}/work/fastqc/{wc.sample}/{list(chunks(wc.sample))[-1]}/{wc.sample}_{wc.r}_fastqc.{wc.ext}",
+    output:
+        f"{O}/fastqc/{{sample}}_{{r}}_fastqc.{{ext}}",
+    wildcard_constraints:
+        r="1|2",
+        ext="html|zip",
+    shell:
+        "cp {input} {output}"
 
 
 # =============================================================================
@@ -364,12 +424,12 @@ rule bowtie2_align:
     input:
         fq=chunk_fastq,
         index=BWT2_INDEX,
-        samplesheet=f"{O}/pipeline_info/samplesheet.valid.csv",
+        samplesheet=f"{O}/samplesheet/samplesheet.valid.csv",
     output:
-        bam=maybe_temp(f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.bam", config["save_aligned_intermediates"]),
-        unmapped=maybe_temp(f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.unmapped.fastq.gz", config["save_aligned_intermediates"]),
+        bam=maybe_temp(f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}.bam", config["save_aligned_intermediates"]),
+        unmapped=maybe_temp(f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}.unmapped.fastq.gz", config["save_aligned_intermediates"]),
     log:
-        f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.bowtie2.log",
+        f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}.bowtie2.log",
     params:
         args=config["bwt2_opts_end2end"],
         args2="" if DNASE else "-F 4",
@@ -395,13 +455,13 @@ if not DNASE:
     # TRIM_READS — trim unmapped reads at the ligation junction
     rule trim_reads:
         input:
-            f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.unmapped.fastq.gz",
+            f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}.unmapped.fastq.gz",
         output:
-            maybe_temp(f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.fastq.gz", config["save_aligned_intermediates"]),
+            maybe_temp(f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}_trimmed.fastq.gz", config["save_aligned_intermediates"]),
         params:
             motif=LIGATION_SITE,
-            tmp=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.tmp.fastq",
-            out=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.fastq",
+            tmp=f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}.tmp.fastq",
+            out=f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}_trimmed.fastq",
         container:
             container_path("ubuntu")
         threads: res("low")["threads"]
@@ -420,12 +480,12 @@ if not DNASE:
     # BOWTIE2_ALIGN_TRIMMED — re-align the trimmed reads
     rule bowtie2_align_trimmed:
         input:
-            fq=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.fastq.gz",
+            fq=f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}_trimmed.fastq.gz",
             index=BWT2_INDEX,
         output:
-            bam=maybe_temp(f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.bam", config["save_aligned_intermediates"]),
+            bam=maybe_temp(f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}_trimmed.bam", config["save_aligned_intermediates"]),
         log:
-            f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.bowtie2.log",
+            f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}_trimmed.bowtie2.log",
         params:
             args=config["bwt2_opts_trimmed"],
         container:
@@ -446,14 +506,14 @@ if not DNASE:
     # MERGE_BOWTIE2 — merge end-to-end + trimmed alignments, name-sort, mapping stats
     rule merge_bowtie2:
         input:
-            bam1=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.bam",
-            bam2=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_trimmed.bam",
+            bam1=f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}.bam",
+            bam2=f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}_trimmed.bam",
         output:
-            bam=maybe_temp(f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_bwt2merged.bam", config["save_aligned_intermediates"]),
-            stats=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.mapstat",
+            bam=maybe_temp(f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}_bwt2merged.bam", config["save_aligned_intermediates"]),
+            stats=f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}.mapstat",
         params:
             prefix="{sample}_{chunk}_{mate}",
-            unsorted=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}_bwt2merged.unsorted.bam",
+            unsorted=f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}_bwt2merged.unsorted.bam",
             sort_mem=config["samtools_sort_mem"],
         container:
             container_path("samtools")
@@ -482,9 +542,9 @@ else:
     # MAPPING_STATS_DNASE
     rule mapping_stats_dnase:
         input:
-            f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.bam",
+            f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}.bam",
         output:
-            stats=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{{mate}}.mapstat",
+            stats=f"{MAPDIR}/{{sample}}_{{chunk}}_{{mate}}.mapstat",
         params:
             prefix="{sample}_{chunk}_{mate}",
         container:
@@ -507,7 +567,7 @@ else:
 
 def mate_bam(mate):
     suffix = "" if DNASE else "_bwt2merged"
-    return f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_{mate}{suffix}.bam"
+    return f"{MAPDIR}/{{sample}}_{{chunk}}_{mate}{suffix}.bam"
 
 
 # COMBINE_MATES — pair R1/R2 alignments, MAPQ filtering, pairing stats
@@ -516,8 +576,8 @@ rule combine_mates:
         r1=mate_bam("R1"),
         r2=mate_bam("R2"),
     output:
-        bam=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.bam",
-        stats=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.pairstat",
+        bam=f"{MAPDIR}/{{sample}}_{{chunk}}_bwt2pairs.bam",
+        stats=f"{MAPDIR}/{{sample}}_{{chunk}}_bwt2pairs.pairstat",
     params:
         args=" ".join(filter(None, [
             "-t",
@@ -542,17 +602,17 @@ if not DNASE:
     # GET_VALID_INTERACTION
     rule get_valid_interaction:
         input:
-            bam=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.bam",
+            bam=f"{MAPDIR}/{{sample}}_{{chunk}}_bwt2pairs.bam",
             resfrag=RESFRAG,
         output:
-            valid=maybe_temp(f"{VPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.validPairs", config["save_pairs_intermediates"]),
-            stats=f"{VPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.RSstat",
+            valid=maybe_temp(f"{VPDIR}/{{sample}}_{{chunk}}_bwt2pairs.validPairs", config["save_pairs_intermediates"]),
+            stats=f"{VPDIR}/{{sample}}_{{chunk}}_bwt2pairs.RSstat",
             other=[
-                maybe_temp(f"{VPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.{ext}", config["save_pairs_intermediates"])
+                maybe_temp(f"{VPDIR}/{{sample}}_{{chunk}}_bwt2pairs.{ext}", config["save_pairs_intermediates"])
                 for ext in ["DEPairs", "SCPairs", "REPairs", "FiltPairs", "DumpPairs", "SinglePairs"]
             ],
         params:
-            outdir=f"{VPDIR}/{{sample}}",
+            outdir=VPDIR,
             args=" ".join(filter(None, [
                 f"-d {config['min_cis_dist']}" if config["min_cis_dist"] > 0 else "",
                 f"-s {config['min_insert_size']}" if config["min_insert_size"] > 0 else "",
@@ -577,12 +637,12 @@ else:
     # GET_VALID_INTERACTION_DNASE
     rule get_valid_interaction_dnase:
         input:
-            bam=f"{MAPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.bam",
+            bam=f"{MAPDIR}/{{sample}}_{{chunk}}_bwt2pairs.bam",
         output:
-            valid=maybe_temp(f"{VPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.validPairs", config["save_pairs_intermediates"]),
-            stats=f"{VPDIR}/{{sample}}/{{sample}}_{{chunk}}_bwt2pairs.RSstat",
+            valid=maybe_temp(f"{VPDIR}/{{sample}}_{{chunk}}_bwt2pairs.validPairs", config["save_pairs_intermediates"]),
+            stats=f"{VPDIR}/{{sample}}_{{chunk}}_bwt2pairs.RSstat",
         params:
-            outdir=f"{VPDIR}/{{sample}}",
+            outdir=VPDIR,
             args=f"-d {config['min_cis_dist']}" if config["min_cis_dist"] > 0 else "",
         container:
             container_path("hicpro_python")
@@ -598,12 +658,11 @@ else:
 # MERGE_VALID_INTERACTION — merge chunks, remove duplicates, merge stats
 rule merge_valid_interaction:
     input:
-        lambda wc: [f"{VPDIR}/{wc.sample}/{wc.sample}_{c}_bwt2pairs.validPairs" for c in chunks(wc.sample)],
+        lambda wc: [f"{VPDIR}/{wc.sample}_{c}_bwt2pairs.validPairs" for c in chunks(wc.sample)],
     output:
         valid=f"{VPDIR}/{{sample}}.allValidPairs",
         stats=f"{STATDIR}/{{sample}}/{{sample}}_allValidPairs.mergestat",
     params:
-        workdir=f"{VPDIR}/{{sample}}",
         args="" if config["keep_dups"] else "-d",
     container:
         container_path("ubuntu")
@@ -615,17 +674,21 @@ rule merge_valid_interaction:
         out_valid=$(realpath {output.valid})
         out_stats=$(realpath {output.stats})
         files=$(for f in {input}; do basename $f; done)
-        cd {params.workdir}
+        # the chunks sit next to the merged file, so merge in a scratch directory
+        tmp=$(mktemp -d)
+        for f in {input}; do ln -s $(realpath $f) $tmp/; done
+        cd $tmp
         bash {SCRIPTS}/hicpro_merge_validpairs.sh {params.args} -p {wildcards.sample} $files
         mv {wildcards.sample}.allValidPairs $out_valid
         mv {wildcards.sample}_allValidPairs.mergestat $out_stats
+        cd - >/dev/null && rm -rf $tmp
         """
 
 
 # MERGE_STATS (mapping stats, one per mate)
 rule merge_mapstats:
     input:
-        lambda wc: [f"{MAPDIR}/{wc.sample}/{wc.sample}_{c}_{wc.mate}.mapstat" for c in chunks(wc.sample)],
+        lambda wc: [f"{MAPDIR}/{wc.sample}_{c}_{wc.mate}.mapstat" for c in chunks(wc.sample)],
     output:
         f"{STATDIR}/{{sample}}/{{sample}}.{{mate}}.mmapstat",
     container:
@@ -640,7 +703,7 @@ rule merge_mapstats:
 # MERGE_STATS (pairing stats)
 rule merge_pairstats:
     input:
-        lambda wc: [f"{MAPDIR}/{wc.sample}/{wc.sample}_{c}_bwt2pairs.pairstat" for c in chunks(wc.sample)],
+        lambda wc: [f"{MAPDIR}/{wc.sample}_{c}_bwt2pairs.pairstat" for c in chunks(wc.sample)],
     output:
         f"{STATDIR}/{{sample}}/{{sample}}.mpairstat",
     container:
@@ -655,7 +718,7 @@ rule merge_pairstats:
 # MERGE_STATS (valid-interaction stats)
 rule merge_rsstats:
     input:
-        lambda wc: [f"{VPDIR}/{wc.sample}/{wc.sample}_{c}_bwt2pairs.RSstat" for c in chunks(wc.sample)],
+        lambda wc: [f"{VPDIR}/{wc.sample}_{c}_bwt2pairs.RSstat" for c in chunks(wc.sample)],
     output:
         f"{STATDIR}/{{sample}}/{{sample}}.mRSstat",
     container:
@@ -857,13 +920,15 @@ rule split_cooler_dump:
 # Downstream analysis
 # =============================================================================
 
-# HIC_PLOT_DIST_VS_COUNTS (named <sample>.<res> so several resolutions do not collide)
+# HIC_PLOT_DIST_VS_COUNTS (prefix meta.id: with several res_dist_decay values
+# nf-core writes every resolution to the same <sample>_distcount.* and the last
+# one wins; here the last resolution of the list is used)
 rule hic_plot_dist_vs_counts:
     input:
-        f"{COOLDIR}/{{sample}}.{{res}}_balanced.cool",
+        lambda wc: f"{COOLDIR}/{wc.sample}.{RES_DIST_DECAY[-1]}_balanced.cool",
     output:
-        png=f"{O}/distance_decay/{{sample}}.{{res}}_distcount.png",
-        txt=f"{O}/distance_decay/{{sample}}.{{res}}_distcount.txt",
+        png=f"{O}/distance_decay/{{sample}}_distcount.png",
+        txt=f"{O}/distance_decay/{{sample}}_distcount.txt",
     container:
         container_path("hicexplorer")
     threads: res("medium")["threads"]
@@ -945,12 +1010,49 @@ rule hic_find_tads:
 
 
 # =============================================================================
+# Software versions (CUSTOM_DUMPSOFTWAREVERSIONS)
+# =============================================================================
+# config/versions.yaml maps every nf-core process to the port rules that run it
+# and the version commands of its module; each command runs in the image of the
+# rule that ran it. Snakemake replaces Nextflow in the Workflow section.
+VERSIONS_YML = f"{O}/pipeline_info/software_versions.yml"
+VERSIONS_MQC = f"{O}/work/versions/software_versions_mqc.yml"
+
+
+def versions_inputs(wc):
+    """Everything else the run produces, so the DAG is complete when it runs."""
+    # every other output (pipeline_info too), so no job drops out of the DAG it reads
+    own = {VERSIONS_YML, VERSIONS_MQC}
+    return [f for f in all_outputs(wc) if f not in own and not str(f).startswith(f"{O}/multiqc/")]
+
+
+localrules:
+    software_versions,
+
+
+rule software_versions:
+    input:
+        versions_inputs,
+    output:
+        yml=VERSIONS_YML,
+        mqc=VERSIONS_MQC,
+    run:
+        sys.path.insert(0, os.path.join(workflow.basedir, "scripts"))
+        from software_versions import collect, dag_jobs, collect_file, styles, version_chunks, workflow_chunk, write_dump, write_topic
+
+        table = os.path.join(workflow.basedir, "config/versions.yaml")
+        versions = collect(table, dag_jobs(workflow, input), globals(), yaml_numbers=False)
+        dump_img = container_path("dumpsoftwareversions")
+        write_dump(versions, "nf-core/hic", "2.1.0", output.yml, output.mqc, img=dump_img)
+
+
+# =============================================================================
 # MULTIQC
 # =============================================================================
 rule multiqc:
     input:
         fastqc=lambda wc: [
-            f"{O}/fastqc/{s}_{c}_{r}_fastqc.zip" for s in SAMPLES for c in chunks(s) for r in (1, 2)
+            f"{O}/work/fastqc/{s}/{c}/{s}_{r}_fastqc.zip" for s in SAMPLES for c in chunks(s) for r in (1, 2)
         ],
         stats=lambda wc: [
             f
@@ -964,6 +1066,7 @@ rule multiqc:
             )
         ],
         config=asset_path(config["multiqc_config"]),
+        versions=VERSIONS_MQC,
     output:
         f"{O}/multiqc/multiqc_report.html",
         directory(f"{O}/multiqc/multiqc_data"),
@@ -977,5 +1080,5 @@ rule multiqc:
     shell:
         """
         multiqc -f -c {input.config} -o $(dirname {output[0]}) \
-            {O}/fastqc {STATDIR} > {log} 2>&1
+            {input.fastqc} {input.stats} {input.versions} > {log} 2>&1
         """

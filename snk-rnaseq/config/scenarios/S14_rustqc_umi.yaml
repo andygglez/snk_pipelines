@@ -1,0 +1,11 @@
+# nf-core tests/rustqc.nf.test "use_rustqc --with_umi"
+use_rustqc: true
+with_umi: true
+umitools_extract_method: regex
+umitools_bc_pattern: "^(?P<umi_1>CGA.{8}){s<=2}.*"
+umi_dedup_tool: umicollapse
+aligner: hisat2
+skip_bbsplit: true
+skip_stringtie: true
+skip_bigwig: true
+skip_pseudo_alignment: true

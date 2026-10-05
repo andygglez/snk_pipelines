@@ -2,8 +2,7 @@
 # Each is the image the matching nf-core/methylseq 4.2.0 module pins
 # (modules/nf-core/*/main.nf, https singularity URL), downloaded into containers/
 # under the file name Nextflow gives it in NXF_SINGULARITY_CACHEDIR.
-# Not listed: PARABRICKS_FQ2BAMMETH (GPU only, not ported) and
-# QUALIMAP_BAMQCCRAM (never called by the pipeline).
+# Not listed: QUALIMAP_BAMQCCRAM (never called by the pipeline).
 containers:
   # BISMARK_GENOMEPREPARATION, BISMARK_ALIGN, BISMARK_DEDUPLICATE,
   # BISMARK_METHYLATIONEXTRACTOR, BISMARK_COVERAGE2CYTOSINE, BISMARK_REPORT, BISMARK_SUMMARY
@@ -35,6 +34,9 @@ containers:
   bedtools: containers/depot.galaxyproject.org-singularity-bedtools-2.31.1--hf5e1c6e_0.img
   # MULTIQC
   multiqc: containers/community-cr-prod.seqera.io-docker-registry-v2-blobs-sha256-8c-8c6c120d559d7ee04c7442b61ad7cf5a9e8970be5feefb37d68eeaa60c1034eb-data.img
+  # PARABRICKS_FQ2BAMMETH (use_gpu). Docker-only image:
+  #   apptainer pull containers/clara-parabricks-4.6.0-1.sif docker://nvcr.io/nvidia/clara/clara-parabricks:4.6.0-1
+  parabricks: containers/clara-parabricks-4.6.0-1.sif
 
 # Where each image above comes from (the URL the nf-core module pins).
 # `pipeline pull <name>` downloads any missing image from here; it has no
@@ -54,3 +56,4 @@ container_urls:
   qualimap: https://depot.galaxyproject.org/singularity/qualimap:2.3--hdfd78af_0
   bedtools: https://depot.galaxyproject.org/singularity/bedtools:2.31.1--hf5e1c6e_0
   multiqc: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/8c/8c6c120d559d7ee04c7442b61ad7cf5a9e8970be5feefb37d68eeaa60c1034eb/data
+  parabricks: docker://nvcr.io/nvidia/clara/clara-parabricks:4.6.0-1

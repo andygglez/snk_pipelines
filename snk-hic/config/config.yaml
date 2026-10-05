@@ -16,6 +16,11 @@ fasta: ""                    ### <path or URL: .fa/.fasta(.gz)>  # Genome FASTA 
 bwt2_index: ""               ### <path or URL: bowtie2 index directory, or "" to build>  # Directory with an existing bowtie2 index; built from fasta if empty
 chromosome_size: ""          ### <path or URL: chrom sizes file, or "" to compute>  # Chromosome sizes file; computed from fasta if empty
 restriction_fragments: ""    ### <path or URL: BED, or "" to compute>  # BED of restriction fragments; computed from fasta if empty
+# iGenomes: `genome` fills every reference parameter left empty from
+# config/igenomes.yaml. Index directories need a local igenomes_base mirror.
+genome: ""                   ### <iGenomes key, e.g. "GRCh38", or "">
+igenomes_base: "s3://ngi-igenomes/igenomes/"  ### <local iGenomes mirror, or the default (HTTPS mirror of the S3 bucket)>
+igenomes_ignore: false       ### [true, false]  # do not load config/igenomes.yaml
 save_reference: false        ### [true, false]  # Keep genome/ (bowtie2 index, sizes, fragments) after the run
 
 # ---- Mapping ----------------------------------------------------------------
@@ -79,6 +84,11 @@ skip_dist_decay: false       ### [true, false]
 skip_compartments: false     ### [true, false]
 skip_tads: false             ### [true, false]
 skip_multiqc: false          ### [true, false]
+# Declared by nf-core/hic 2.1.0 but read by no process there (no effect):
+skip_maps: false             ### [true, false]
+skip_balancing: false        ### [true, false]
+skip_mcool: false            ### [true, false]
+multiqc_title: ""            ### <string, or "">
 
 # ---- Tool arguments (conf/modules.config ext.args) --------------------------
 cooler_cload_args: "pairs -c1 2 -p1 3 -c2 4 -p2 5"  ### <string: tool arguments>

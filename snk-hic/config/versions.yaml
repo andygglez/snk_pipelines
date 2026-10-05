@@ -1,0 +1,226 @@
+# nf-core process -> port rules (regexes), optional `when` (Python, Snakefile names + any_wc()),
+# module version-reporting style (file = versions.yml, topic = topic channel) and the
+# version commands of its nf-core module. Generated from the pinned nf-core sources;
+# read by the software_versions rule.
+BOWTIE2_ALIGN:
+  module: BOWTIE2_ALIGN
+  style: file
+  tools:
+  - - bowtie2
+    - echo $(bowtie2 --version 2>&1) | sed 's/^.*bowtie2-align-s version //; s/ .*$//'
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  - - pigz
+    - ' pigz --version 2>&1 | sed ''s/pigz //g'' '
+  rules:
+  - bowtie2_align
+BOWTIE2_ALIGN_TRIMMED:
+  module: BOWTIE2_ALIGN
+  style: file
+  tools:
+  - - bowtie2
+    - echo $(bowtie2 --version 2>&1) | sed 's/^.*bowtie2-align-s version //; s/ .*$//'
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  - - pigz
+    - ' pigz --version 2>&1 | sed ''s/pigz //g'' '
+  rules:
+  - bowtie2_align_trimmed
+BOWTIE2_BUILD:
+  module: BOWTIE2_BUILD
+  style: file
+  tools:
+  - - bowtie2
+    - echo $(bowtie2 --version 2>&1) | sed 's/^.*bowtie2-align-s version //; s/ .*$//'
+  rules:
+  - bowtie2_build
+COMBINE_MATES:
+  module: COMBINE_MATES
+  style: file
+  tools:
+  - - python
+    - echo $(python --version 2>&1) | sed 's/Python //'
+  rules:
+  - combine_mates
+COOLER_BALANCE:
+  module: COOLER_BALANCE
+  style: file
+  tools:
+  - - cooler
+    - cooler --version 2>&1 | sed 's/cooler, version //'
+  rules:
+  - cooler_balance
+COOLER_CLOAD:
+  module: COOLER_CLOAD
+  style: file
+  tools:
+  - - cooler
+    - cooler --version 2>&1 | sed 's/cooler, version //'
+  rules:
+  - cooler_cload
+COOLER_DUMP:
+  module: COOLER_DUMP
+  style: file
+  tools:
+  - - cooler
+    - cooler --version 2>&1 | sed 's/cooler, version //'
+  rules:
+  - cooler_dump
+COOLER_MAKEBINS:
+  module: COOLER_MAKEBINS
+  style: file
+  tools:
+  - - cooler
+    - cooler --version 2>&1 | sed 's/cooler, version //'
+  rules:
+  - cooler_makebins
+COOLER_ZOOMIFY:
+  module: COOLER_ZOOMIFY
+  style: file
+  tools:
+  - - cooler
+    - cooler --version 2>&1 | sed 's/cooler, version //'
+  rules:
+  - cooler_zoomify
+COOLTOOLS_EIGSCIS:
+  module: COOLTOOLS_EIGSCIS
+  style: file
+  tools:
+  - - cooltools
+    - cooltools --version 2>&1 | grep version | sed 's/cooltools, version //'
+  rules:
+  - cooltools_eigscis
+COOLTOOLS_INSULATION:
+  module: COOLTOOLS_INSULATION
+  style: file
+  tools:
+  - - cooltools
+    - cooltools --version 2>&1 | sed 's/cooltools, version //'
+  rules:
+  - cooltools_insulation
+CUSTOM_GETCHROMSIZES:
+  module: CUSTOM_GETCHROMSIZES
+  style: file
+  tools:
+  - - getchromsizes
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - getchromsizes
+FASTQC:
+  module: FASTQC
+  style: file
+  tools:
+  - - fastqc
+    - ' fastqc --version | sed -e "s/FastQC v//g" '
+  rules:
+  - fastqc
+GET_RESTRICTION_FRAGMENTS:
+  module: GET_RESTRICTION_FRAGMENTS
+  style: file
+  tools:
+  - - python
+    - echo $(python --version 2>&1) | sed 's/Python //'
+  rules:
+  - get_restriction_fragments
+GET_VALID_INTERACTION:
+  module: GET_VALID_INTERACTION
+  style: file
+  tools:
+  - - python
+    - echo $(python --version 2>&1) | sed 's/Python //'
+  rules:
+  - get_valid_interaction
+GET_VALID_INTERACTION_DNASE:
+  module: GET_VALID_INTERACTION_DNASE
+  style: file
+  tools:
+  - - python
+    - echo $(python --version 2>&1) | sed 's/Python //'
+  rules:
+  - get_valid_interaction_dnase
+HICPRO2PAIRS:
+  module: HICPRO2PAIRS
+  style: file
+  tools:
+  - - pairix
+    - 'echo $(pairix 2>&1 | grep Version | sed -e ''s/Version: //'')'
+  rules:
+  - hicpro2pairs
+HIC_FIND_TADS:
+  module: HIC_FIND_TADS
+  style: file
+  tools:
+  - - hicexplorer
+    - hicFindTADs --version 2>&1 | sed 's/hicFindTADs //'
+  rules:
+  - hic_find_tads
+HIC_PLOT_DIST_VS_COUNTS:
+  module: HIC_PLOT_DIST_VS_COUNTS
+  style: file
+  tools:
+  - - hicexplorer
+    - hicPlotDistVsCounts --version 2>&1 | sed 's/hicPlotDistVsCounts //'
+  rules:
+  - hic_plot_dist_vs_counts
+ICE_NORMALIZATION:
+  module: ICE_NORMALIZATION
+  style: file
+  tools:
+  - - python
+    - echo $(python --version 2>&1) | sed 's/Python //'
+  - - iced
+    - python -c "import iced; print(iced.__version__)"
+  rules:
+  - ice_normalization
+MERGE_BOWTIE2:
+  module: MERGE_BOWTIE2
+  style: file
+  tools:
+  - - samtools
+    - echo $(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*$//'
+  rules:
+  - merge_bowtie2
+MERGE_STATS:
+  module: MERGE_STATS
+  style: file
+  tools:
+  - - python
+    - echo $(python --version 2>&1) | sed 's/Python //'
+  rules:
+  - merge_mapstats
+  - merge_pairstats
+  - merge_rsstats
+MERGE_VALID_INTERACTION:
+  module: MERGE_VALID_INTERACTION
+  style: file
+  tools:
+  - - sort
+    - echo $(sort --version 2>&1 | head -1 | awk '{print $NF}' 2>&1)
+  rules:
+  - merge_valid_interaction
+MULTIQC:
+  module: MULTIQC
+  style: file
+  tools:
+  - - multiqc
+    - ' multiqc --version | sed -e "s/multiqc, version //g" '
+  rules:
+  - multiqc
+SPLIT_COOLER_DUMP:
+  module: SPLIT_COOLER_DUMP
+  style: file
+  tools:
+  - - cooler
+    - awk --version | head -1 | cut -f1 -d, | sed -e 's/GNU Awk //'
+  rules:
+  - split_cooler_dump
+TRIM_READS:
+  module: TRIM_READS
+  style: file
+  tools:
+  - - gzip
+    - echo $(gzip --version 2>&1) | head -1 | cut -d" " -f2
+  rules:
+  - trim_reads
+# Not listed: SAMPLESHEET_CHECK runs, but nf-core/hic 2.1.0's INPUT_CHECK emits no
+# versions channel, so it is absent from software_versions.yml.

@@ -13,11 +13,11 @@
 # methylation extraction / coverage2cytosine / reports / summary, Picard
 # MarkDuplicates, MethylDackel, rastair (TAPS), Qualimap, Preseq, the targeted
 # sequencing subworkflow and MultiQC.
-# Not ported (rejected at start-up): iGenomes (`genome`) and the Parabricks
-# GPU aligner (PARABRICKS_FQ2BAMMETH, only used with `-profile gpu`).
-# Not produced: Nextflow run metadata (pipeline_info execution reports and
-# software-version YAMLs, MultiQC workflow summary / versions / methods
-# sections).
+# use_gpu (nf-core `-profile gpu`) runs PARABRICKS_FQ2BAMMETH instead of
+# BWAMETH_ALIGN; it needs an NVIDIA GPU.
+# Not produced: Nextflow run metadata (pipeline_info execution reports, MultiQC
+# workflow summary / methods sections). Software versions are collected by
+# software_versions.
 # Kept as in nf-core 4.2.0 (quirks, not fixed here):
 #   - PICARD_COLLECTHSMETRICS never runs: its inputs are combined with an empty
 #     ch_gzi channel. With collecthsmetrics only the sequence dictionary and the
@@ -44,11 +44,56 @@
 import csv
 import os
 import re
+import sys
 import urllib.request
 from collections import OrderedDict
 
 configfile: "config/config.yaml"
 configfile: "config/containers.yaml"
+
+# -----------------------------------------------------------------------------
+# iGenomes (main.nf getGenomeAttribute): with `genome`, every parameter left
+# empty is filled from config/igenomes.yaml (conf/igenomes.config). nf-core reads
+# s3://ngi-igenomes directly; here the default base is the public HTTPS mirror,
+# which serves single files only, so iGenomes index *directories* are only used
+# when igenomes_base is a local mirror (otherwise the index is built locally).
+# -----------------------------------------------------------------------------
+IGENOMES_ATTRS = {"fasta": "fasta", "fasta_index": "fasta_index", "bwameth_index": "bwameth", "bwamem_index": "bwa", "bismark_index": "bismark_hisat2" if config.get("aligner") == "bismark_hisat" else "bismark"}
+
+
+def apply_igenomes():
+    import yaml as _yaml
+
+    genome = config.get("genome")
+    if not genome:
+        return None
+    genomes = {} if config.get("igenomes_ignore") else _yaml.safe_load(
+        open(os.path.join(workflow.basedir, "config/igenomes.yaml")))
+    if genome not in genomes:
+        raise ValueError(f"Genome {genome!r} not found in config/igenomes.yaml. Currently available: "
+                         f"{', '.join(genomes)}")
+    base = str(config.get("igenomes_base") or "s3://ngi-igenomes/igenomes/").rstrip("/")
+    if base.startswith("s3://ngi-igenomes/"):
+        base = "https://ngi-igenomes.s3.amazonaws.com/" + base[len("s3://ngi-igenomes/"):]
+    attrs = genomes[genome]
+    for param, key in IGENOMES_ATTRS.items():
+        if config.get(param) not in (None, "") or key not in attrs:
+            continue
+        value = attrs[key]
+        if isinstance(value, str):
+            value = value.format(igenomes_base=base, project_dir=workflow.basedir)
+            if value.endswith("/") and re.match(r"^(https?|ftp)://", value):
+                print(f"WARNING: iGenomes {key} index {value} is a remote directory; it will be built "
+                      "locally instead (set igenomes_base to a local iGenomes mirror to use it).",
+                      file=sys.stderr)
+                continue
+            value = value.rstrip("/") if value.endswith("/") else value
+        config[param] = value
+    return attrs
+
+
+IGENOME = apply_igenomes()
+
 
 ASSETS = os.path.join(workflow.basedir, "assets")
 
@@ -153,12 +198,11 @@ if ALIGNER not in ("bismark", "bismark_hisat", "bwameth", "bwamem"):
     raise ValueError(
         f"ERROR: Invalid aligner '{ALIGNER}'. Valid options are: 'bismark', 'bismark_hisat', 'bwameth' or 'bwamem'."
     )
-if param("genome"):
-    raise ValueError("iGenomes (`genome`) is not ported to snk-methylseq; give `fasta` (and indices) explicitly.")
 if not param("fasta"):
     raise ValueError("`fasta` is required.")
-if flag("use_gpu"):
-    raise ValueError("The Parabricks GPU aligner (PARABRICKS_FQ2BAMMETH) is not ported.")
+# `-profile gpu` in nf-core: bwameth alignment with Parabricks fq2bam_meth
+# (needs an NVIDIA GPU; add "--nv" to --apptainer-args).
+USE_GPU = flag("use_gpu")
 
 BISMARK = ALIGNER in ("bismark", "bismark_hisat")
 BT = "hisat2" if ALIGNER == "bismark_hisat" else "bt2"
@@ -501,7 +545,8 @@ MULTIQC_DIR = f"{O}/multiqc/{ALIGNER}"
 
 
 def all_targets():
-    t = []
+    # FASTA_INDEX_METHYLSEQ gunzips a .gz fasta even when the indices are given
+    t = [FASTA] if FASTA != FASTA_IN else []
     for s in IDS:
         if not SKIP_FASTQC:
             t += fastqc_outputs(s)
@@ -549,7 +594,7 @@ def built_reference():
 
 rule all:
     input:
-        all_targets(),
+        lambda wc: all_targets() + [VERSIONS_YML],
 
 
 # -----------------------------------------------------------------------------
@@ -1268,16 +1313,29 @@ rule bwameth_align:
     params:
         args=args("bwameth_align"),
         reads=lambda wc, input: " ".join(os.path.basename(r) for r in input.reads),
+        in_fq=lambda wc, input: (("--in-se-fq " if is_se(wc.id) else "--in-fq ")
+                                 + " ".join(os.path.basename(r) for r in input.reads)),
     container:
-        container_path("bwameth")
+        container_path("parabricks" if USE_GPU else "bwameth")
     threads: res("process_high")["threads"]
     resources:
-        mem_mb=res("process_high")["mem_mb"],
+        # conf/base.config: PARABRICKS_FQ2BAMMETH memory 100.GB
+        mem_mb=res("parabricks")["mem_mb"] if USE_GPU else res("process_high")["mem_mb"],
     shadow:
         "minimal"
     shell:
         """
         stage {input.reads} {input.fasta}
+        if [ -n "{USE_GPU}" ] && [ "{USE_GPU}" = "True" ]; then
+            # PARABRICKS_FQ2BAMMETH (ext.args '--low-memory', one GPU)
+            mkdir {INDEX_NAME}
+            for f in "$(realpath {input.index})"/*; do ln -s "$f" {INDEX_NAME}/; done
+            ln -sf $(readlink {FASTA_NAME}) {INDEX_NAME}/{FASTA_NAME}
+            pbrun fq2bam_meth --ref {INDEX_NAME}/{FASTA_NAME} {params.in_fq} --out-bam {wildcards.id}.bam \
+                --num-gpus {config[parabricks_num_gpus]} --low-memory
+            mv {wildcards.id}.bam {output}
+            exit 0
+        fi
         mkdir {INDEX_NAME}
         for f in "$(realpath {input.index})"/*; do ln -s "$f" {INDEX_NAME}/; done
         export BWA_METH_SKIP_TIME_CHECKS=1
@@ -1695,7 +1753,9 @@ rule qualimap_bamqc:
     wildcard_constraints:
         id=alternation(IDS),
     params:
-        args="",  # -gd HUMAN / MOUSE come from iGenomes `genome`, not ported
+        # conf/modules/qualimap_bamqc.config: -gd from the genome name
+        args=("-gd HUMAN" if str(config.get("genome")).startswith("GRCh") else
+              "-gd MOUSE" if str(config.get("genome")).startswith("GRCm") else ""),
         regions=lambda wc, input: f"--gff {input.regions}" if input.regions else "",
         pairs=lambda wc: "" if is_se(wc.id) else "--collect-overlap-pairs",
         mem=lambda wc, resources: f"{jvm_mem(resources)}M",
@@ -1731,6 +1791,12 @@ rule qualimap_versions:
     qualimap: $(echo $(qualimap 2>&1) | sed 's/^.*QualiMap v.//; s/Built.*$//')
 END_VERSIONS
         """
+
+
+def preseq_succeeded():
+    """A failed (ignored) PRESEQ_LCEXTRAP task emits no versions in nf-core."""
+    d = f"{O}/{ALIGNER}/preseq"
+    return os.path.isdir(d) and any(f.endswith(".lc_extrap.txt") for f in os.listdir(d))
 
 
 # PRESEQ_LCEXTRAP (errorStrategy 'ignore': on failure nothing is published)
@@ -1878,9 +1944,59 @@ def multiqc_files(wc):
     return files
 
 
+# =============================================================================
+# Software versions (softwareVersionsToYAML + collectFile)
+# =============================================================================
+# config/versions.yaml maps every nf-core process to the port rules that run it
+# and the version commands of its module; each command runs in the image of the
+# rule that ran it. Snakemake replaces Nextflow in the Workflow section.
+VERSIONS_YML = f"{O}/pipeline_info/nf_core_methylseq_software_mqc_versions.yml"
+VERSIONS_TOPIC = f"{O}/pipeline_info/nf_core_methylseq_topic_versions.yml"
+VERSIONS_MQC = f"{W}/multiqc/versions/nf_core_methylseq_software_mqc_versions.yml"
+
+
+def versions_inputs(wc):
+    """Everything else the run produces, so the DAG is complete when it runs."""
+    # every other output (pipeline_info too), so no job drops out of the DAG it reads
+    own = {VERSIONS_YML, VERSIONS_TOPIC, VERSIONS_MQC}
+    return [f for f in all_targets() if f not in own and not str(f).startswith(f"{O}/multiqc/")]
+
+
+localrules:
+    software_versions,
+
+
+rule software_versions:
+    input:
+        versions_inputs,
+    output:
+        yml=VERSIONS_YML,
+        topic=VERSIONS_TOPIC,
+        mqc=VERSIONS_MQC,
+    run:
+        sys.path.insert(0, os.path.join(workflow.basedir, "scripts"))
+        from software_versions import collect, dag_jobs, collect_file, styles, version_chunks, workflow_chunk, write_dump, write_topic
+
+        table = os.path.join(workflow.basedir, "config/versions.yaml")
+        versions = collect(table, dag_jobs(workflow, input), globals())
+        style = styles(table)
+        file_v = {p: v for p, v in versions.items() if style.get(p) != "topic"}
+        topic_v = {p: v for p, v in versions.items() if style.get(p) == "topic"}
+        main = collect_file(version_chunks(file_v) + [workflow_chunk("nf-core/methylseq", "v4.2.0")])
+        topic = collect_file(version_chunks(topic_v)) if topic_v else ""
+        # MultiQC gets the main file; on completion nf-core appends the topic file to it
+        with open(output.mqc, "w") as fh:
+            fh.write(main)
+        with open(output.topic, "w") as fh:
+            fh.write(topic)
+        with open(output.yml, "w") as fh:
+            fh.write(main + topic)
+
+
 rule multiqc:
     input:
         files=multiqc_files,
+        versions=VERSIONS_MQC,
         preseq=[f"{W}/preseq/{s}.done" for s in IDS] if flag("run_preseq") else [],
         config=f"{ASSETS}/multiqc_config.yml",
         extra_config=asset_path(param("multiqc_config")) if param("multiqc_config") else [],
@@ -1907,7 +2023,7 @@ rule multiqc:
         """
         mkdir work_mqc && cd work_mqc
         i=0
-        for f in {input.files}; do
+        for f in {input.files} {input.versions}; do
             i=$((i+1)); mkdir -p $i; ln -s "$(realpath "../$f" 2>/dev/null || realpath "$f")" $i/
         done
         if [ -n "{params.preseq_logs}" ] && ls {params.preseq_logs}/*.command.log >/dev/null 2>&1; then

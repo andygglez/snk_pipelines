@@ -1,0 +1,4 @@
+# nf-core tests/salmon.nf.test "--skip_alignment --skip_quantification_merge"
+pseudo_aligner: salmon
+skip_alignment: true
+skip_quantification_merge: true

@@ -1,0 +1,6 @@
+# nf-core tests/kallisto.nf.test
+pseudo_aligner: kallisto
+skip_qc: true
+skip_alignment: true
+additional_fasta: ""
+transcript_fasta: ""

@@ -1,0 +1,6 @@
+# nf-core tests/nofasta.nf.test
+skip_alignment: true
+fasta: ""
+additional_fasta: ""
+salmon_index: ""
+transcript_fasta: "https://raw.githubusercontent.com/nf-core/test-datasets/d1f59361a013a8820c824d606f5853db0d6c7999/reference/transcriptome_match_gtf.fa"

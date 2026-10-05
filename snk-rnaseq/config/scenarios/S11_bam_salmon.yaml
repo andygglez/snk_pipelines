@@ -1,0 +1,3 @@
+# nf-core tests/bam_input.nf.test "BAM input for Salmon"
+input: "config/samplesheet_test_with_bams.csv"
+skip_alignment: true

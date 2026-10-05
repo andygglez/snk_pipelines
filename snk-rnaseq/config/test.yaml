@@ -26,3 +26,5 @@ resources:
   process_medium: {threads: 4, mem_mb: 15360}
   process_high:   {threads: 4, mem_mb: 15360}
   trimgalore:     {threads: 4, mem_mb: 4096}
+  umicollapse:    {threads: 4, mem_mb: 15360}
+  hisat2_build:   {threads: 4, mem_mb: 15360}

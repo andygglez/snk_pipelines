@@ -16,7 +16,11 @@ outdir: "results"            ### <directory>
 workdir: "work"              ### <directory>
 
 # ---- References -------------------------------------------------------------
-# iGenomes (`genome`) is not ported: give the files explicitly.
+# iGenomes: `genome` fills every reference parameter left empty from
+# config/igenomes.yaml. Index directories need a local igenomes_base mirror.
+genome: ""                   ### <iGenomes key, e.g. "GRCh38", or "">
+igenomes_base: "s3://ngi-igenomes/igenomes/"  ### <local iGenomes mirror, or the default (HTTPS mirror of the S3 bucket)>
+igenomes_ignore: false       ### [true, false]  # do not load config/igenomes.yaml
 fasta: ""                    ### <path or URL: .fa/.fasta(.gz)>  # Genome FASTA (.gz allowed). Required.
 gtf: ""                      ### <path or URL: .gtf(.gz), or "" if gff is set>  # GTF (.gz allowed). Either gtf or gff is required.
 gff: ""                      ### <path or URL: .gff/.gff3(.gz), or "">  # GFF3, converted to GTF with gffread if gtf is empty
