@@ -108,6 +108,68 @@ def missing_images(name, user_config=None):
             if not os.path.isfile(v[0])}
 
 
+def auto_binds(configfile, workdir):
+    """Directories the containers need to see the paths in the user config.
+
+    Every string value of the config (comma-separated lists too) that names an
+    existing path, or an absolute path whose parent exists (outdir, workdir), is
+    bound by its directory. Small CSV/TSV/TXT files (samplesheets, BBSplit and
+    rRNA lists) are scanned for paths the same way. Both the path as written
+    and its symlink-resolved target are bound: apptainer starts with --home set
+    to the run directory, so neither $HOME nor /project symlink targets exist
+    inside the container otherwise."""
+    dirs, seen = [], set()
+
+    def add_dir(d):
+        for p in (os.path.abspath(d), os.path.realpath(d)):
+            if p != os.sep and "," not in p and ":" not in p:
+                dirs.append(p)
+
+    def visit(token, base):
+        token = token.strip().strip('"\'')
+        if not token or "://" in token or "\n" in token or len(token) > 4096:
+            return
+        path = os.path.abspath(os.path.join(base, os.path.expanduser(token)))
+        if path in seen:
+            return
+        seen.add(path)
+        if os.path.isdir(path):
+            add_dir(path)
+        elif os.path.exists(path):
+            add_dir(os.path.dirname(path))
+            real = os.path.realpath(path)
+            if real != path:
+                add_dir(os.path.dirname(real))
+            if (path.endswith((".csv", ".tsv", ".txt"))
+                    and os.path.getsize(path) < (1 << 20)):
+                with open(path, errors="replace") as fh:
+                    for line in fh:
+                        for cell in line.replace("\t", ",").split(","):
+                            visit(cell, os.path.dirname(path))
+        elif os.path.isabs(token) and os.path.isdir(os.path.dirname(path)):
+            add_dir(os.path.dirname(path))  # output dir not created yet
+
+    def walk(value):
+        if isinstance(value, dict):
+            for k, v in value.items():
+                if k not in ("containers", "container_urls"):
+                    walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+        elif isinstance(value, str):
+            for token in value.split(","):
+                visit(token, workdir)
+
+    walk(load_yaml(configfile))
+    # Drop directories already covered by a bound parent.
+    out = []
+    for d in sorted(set(dirs)):
+        if not any(d.startswith(p.rstrip(os.sep) + os.sep) for p in out):
+            out.append(d)
+    return out
+
+
 def find_snakemake(override):
     # The snakemake installed next to this Python (uv sync / uv tool install)
     # comes before PATH: `uv tool` exposes only `pipeline`, not snakemake.
@@ -216,6 +278,8 @@ def cmd_run(args):
             die(msg)
 
     binds = [workdir] + [os.path.abspath(b) for b in args.bind]
+    if not args.no_auto_bind:
+        binds += auto_binds(configfile, workdir)
     cmd = [
         find_snakemake(args.snakemake),
         "--snakefile", os.path.join(pdir, "Snakefile"),
@@ -280,7 +344,10 @@ def main():
                    help="directory to run in (outputs, relative paths) [.]")
     p.add_argument("-B", "--bind", action="append", default=[],
                    help="extra path to bind into the containers (repeatable); "
-                        "the workdir is always bound")
+                        "the workdir and the directories of every path in the "
+                        "config and its samplesheets are bound automatically")
+    p.add_argument("--no-auto-bind", action="store_true",
+                   help="bind only the workdir and -B paths")
     p.add_argument("-n", "--dry-run", action="store_true")
     p.add_argument("--no-check", action="store_true",
                    help="start even if images are missing")
