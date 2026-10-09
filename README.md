@@ -492,6 +492,126 @@ WT_REP1,WT_REP1_R1.fastq.gz,WT_REP1_R2.fastq.gz,auto
 - Ported route: `aligner: star_salmon` with Trim Galore. Options that are not
   ported yet are rejected at start-up with a clear message.
 
+#### Conditions in the samplesheet
+
+The samplesheet can start with an optional `condition` column. The sample ID
+is then `<condition>_<sample>`, and every per-sample output (BAMs, quantification,
+QC reports, MultiQC) is named after it:
+
+```csv
+condition,sample,fastq_1,fastq_2,strandedness
+Parental,rep1,Parental_rep1_R1.fastq.gz,Parental_rep1_R2.fastq.gz,auto
+Parental,rep2,Parental_rep2_R1.fastq.gz,Parental_rep2_R2.fastq.gz,auto
+NSD2KO,rep1,NSD2KO_rep1_R1.fastq.gz,NSD2KO_rep1_R2.fastq.gz,auto
+NSD2KO,rep2,NSD2KO_rep2_R1.fastq.gz,NSD2KO_rep2_R2.fastq.gz,auto
+```
+
+This gives the samples `Parental_rep1`, `Parental_rep2`, `NSD2KO_rep1` and
+`NSD2KO_rep2`.
+
+- A condition must start with a letter or digit, and contain only letters,
+  digits, `_`, `.` or `-`.
+- Rows with the same condition and sample are runs of one sample, and are
+  concatenated as before.
+- Without a `condition` column, the samplesheet works exactly as in nf-core.
+  The `sample` column is then the full sample ID.
+- The condition is the design factor of the differential-expression step below.
+
+#### Differential expression and GSEA (not part of nf-core)
+
+This step goes beyond nf-core/rnaseq, which stops at quantification and
+DESeq2 QC. It runs only when `comparisons` is set in the config, and it needs
+the `condition` column. List each comparison as a baseline and a treatment
+condition:
+
+```yaml
+comparisons:
+  - {baseline: "Parental", treatment: "NSD2KO"}
+  - {baseline: "Parental", treatment: "NSD1KO"}
+gsea_gmt:                         # optional; empty = no GSEA
+  - /path/to/h.all.v2024.1.Hs.symbols.gmt
+```
+
+The step runs on the merged gene counts of the quantification you chose. That
+is Salmon by default (`star_salmon`). With `star_rsem`, `bowtie2_salmon` or
+`pseudo_aligner`, it runs on those results instead (or as well).
+
+For each quantification, it runs three steps:
+
+1. **PyDESeq2.** It rounds the tximport gene table to integer counts, drops
+   genes with fewer than `de_min_counts` reads, and fits DESeq2 with the design
+   `~condition`. Every sample is used in the fit. Each comparison is then tested
+   as treatment vs. baseline. With `de_lfc_shrink: true`, log2 fold changes are
+   shrunk; the statistic and p-values come from the unshrunk model.
+2. **Volcano and MA plots.** One of each per comparison. Genes count as
+   significant when `padj < de_padj` and `|log2FC| >= de_lfc`. The
+   `de_label_top` most significant genes are labelled.
+3. **Preranked GSEA** (GSEApy), one run per comparison and GMT file. Genes are
+   ranked by the DESeq2 Wald statistic.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `comparisons` | `[]` | `{baseline, treatment}` pairs; empty turns the step off |
+| `de_counts` | `gene_counts_length_scaled` | tximport table used (`gene_counts` also accepted) |
+| `de_min_counts` | `10` | minimum total reads per gene |
+| `de_padj` | `0.05` | adjusted p-value cutoff (also the DESeq2 `alpha`) |
+| `de_lfc` | `1.0` | absolute log2 fold-change cutoff |
+| `de_lfc_shrink` | `true` | report shrunk log2 fold changes |
+| `de_label_top` | `15` | genes labelled on the volcano plot |
+| `gsea_gmt` | `[]` | local GMT files |
+| `gsea_gene_id` | `gene_name` | identifier in the GMT files (`gene_name` or `gene_id`) |
+| `gsea_min_size` / `gsea_max_size` | `15` / `500` | gene-set size limits |
+| `gsea_permutations` | `1000` | permutations |
+| `gsea_seed` | `42` | random seed |
+| `gsea_top_terms` | `10` | terms drawn in the dot plot and enrichment plots |
+
+Requirements, checked at start-up:
+
+- Each condition in a comparison needs at least 2 samples.
+- The baseline and treatment must differ.
+- `skip_quantification_merge` must be off, because DESeq2 needs the merged
+  count table.
+
+GSEA does not download gene sets. Compute nodes are offline, so give local
+GMT files, for example from [MSigDB](https://www.gsea-msigdb.org/gsea/msigdb).
+Their identifiers must match `gsea_gene_id`. For human, this means gene
+symbols with `gene_name`.
+
+Outputs, under `<outdir>/<quantification>/differential/` (for example
+`star_salmon/differential/`):
+
+```
+deseq2.normalized_counts.tsv   size-factor normalised counts (gene_id, gene_name, samples)
+deseq2.vst.tsv                 variance-stabilised counts
+deseq2.size_factors.tsv
+deseq2.pca.pdf / .tsv          PCA of the 500 most variable genes (VST)
+deseq2.log
+NSD2KO_vs_Parental/
+    NSD2KO_vs_Parental.deseq2.results.tsv      every tested gene, sorted by padj
+    NSD2KO_vs_Parental.deseq2.significant.tsv  genes passing de_padj and de_lfc
+    NSD2KO_vs_Parental.volcano.pdf / .png
+    NSD2KO_vs_Parental.ma.pdf
+    gsea/<gmt name>/
+        gsea.rnk                ranked gene list
+        gsea.results.tsv        ES, NES, p-values, FDR, leading-edge genes
+        gsea.top_terms.pdf      dot plot of the top terms
+        enrichment_plots/       running-score plot for each top term
+```
+
+The results table has `gene_id`, `gene_name`, `baseMean`, `log2FoldChange`
+(shrunk if enabled), `lfcSE`, `stat`, `pvalue`, `padj` and
+`log2FoldChange_unshrunk`. A positive log2 fold change means higher expression
+in the treatment.
+
+The step uses two extra images, the biocontainers `pydeseq2` and `gseapy`.
+They are listed in `containers.yaml`, so `pipeline pull rnaseq` downloads them.
+Because `pipeline run` checks every image, pull them once even if you never
+use this step.
+
+A test overlay, `snk-rnaseq/config/scenarios/DE_pydeseq2.yaml`, runs the test
+profile with conditions (`config/samplesheet_test_de.csv`), the comparison
+RAP1_UNINDUCED vs. WT, and a toy GMT file.
+
 ### chipseq
 
 Samplesheet:

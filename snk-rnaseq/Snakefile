@@ -31,7 +31,7 @@ import os
 import re
 import sys
 import urllib.request
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 
 configfile: "config/config.yaml"
 configfile: "config/containers.yaml"
@@ -518,15 +518,30 @@ def mem_gb(text):
 # -----------------------------------------------------------------------------
 # Samplesheet (samplesheetToList + checkSamplesAfterGrouping)
 # -----------------------------------------------------------------------------
-# Columns: sample,fastq_1,fastq_2,strandedness[,seq_platform,seq_center,
+# Columns: [condition,]sample,fastq_1,fastq_2,strandedness[,seq_platform,seq_center,
 # genome_bam,transcriptome_bam,percent_mapped]. The BAM columns are only used
 # with skip_alignment (pre-aligned input, first non-empty value per sample).
+# Port extension (not in nf-core): an optional `condition` column. The sample
+# ID, used as the prefix of every per-sample file, is then
+# <condition>_<sample> (Parental + rep1 -> Parental_rep1), and the condition is
+# the DESeq2 design factor of the differential-expression rules.
 SAMPLES = OrderedDict()
+SHEET_ROWS = []  # samplesheet rows with `sample` replaced by the sample ID
 with open(config["input"], newline="") as fh:
-    for row in csv.DictReader(fh):
+    _reader = csv.DictReader(fh)
+    HAS_CONDITION = "condition" in (_reader.fieldnames or [])
+    for row in _reader:
         sample = str(row["sample"]).strip()
         if not re.fullmatch(r"\S+", sample):
             raise ValueError(f"Sample name {sample!r} must not contain spaces.")
+        condition = None
+        if HAS_CONDITION:
+            condition = str(row["condition"] or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9][\w.-]*", condition):
+                raise ValueError(f"Sample {sample}: condition {condition!r} must be non-empty, start with a "
+                                 "letter or digit and contain only letters, digits, '_', '.' or '-'.")
+            sample = f"{condition}_{sample}"
+        SHEET_ROWS.append(dict(row, sample=sample))
         fq1, fq2 = (row.get("fastq_1") or "").strip(), (row.get("fastq_2") or "").strip()
         meta = {
             "strandedness": (row.get("strandedness") or "auto").strip(),
@@ -544,7 +559,8 @@ with open(config["input"], newline="") as fh:
             if fq1 and prev["runs"] and prev["runs"][0][0].endswith(".gz") != fq1.endswith(".gz"):
                 raise ValueError(f"Runs of sample {sample} mix compressed and uncompressed FASTQ.")
         else:
-            SAMPLES[sample] = dict(meta, runs=[], genome_bam="", transcriptome_bam="", percent_mapped=None)
+            SAMPLES[sample] = dict(meta, runs=[], genome_bam="", transcriptome_bam="", percent_mapped=None,
+                                   condition=condition)
         entry = SAMPLES[sample]
         if fq1:
             entry["runs"].append((stage(fq1), stage(fq2) if fq2 else None))
@@ -567,6 +583,41 @@ for _s, _e in SAMPLES.items():
 # goes to the BAM branch only (its FASTQs are not processed).
 BAM_SAMPLES = [s for s in SAMPLES if SKIP_ALIGN and (SAMPLES[s]["genome_bam"] or SAMPLES[s]["transcriptome_bam"])]
 FQ_SAMPLES = [s for s in SAMPLES if SAMPLES[s]["runs"] and s not in BAM_SAMPLES]
+
+# Samplesheet read by the rules (SummarizedExperiment colData, MultiQC name
+# tables): with a `condition` column, a copy whose `sample` column holds the
+# sample IDs; otherwise the input samplesheet itself.
+SHEET = f"{W}/samplesheet.ids.csv" if HAS_CONDITION else config["input"]
+
+# --- Differential expression (port extension) ----------------------------------
+COMPARISONS = config.get("comparisons") or []
+for _c in COMPARISONS:
+    if not isinstance(_c, dict) or set(_c) != {"baseline", "treatment"}:
+        raise ValueError(f"Each entry of `comparisons` must be {{baseline: <condition>, treatment: <condition>}} "
+                         f"(got {_c!r}).")
+if COMPARISONS:
+    if not HAS_CONDITION:
+        raise ValueError("`comparisons` needs a `condition` column in the samplesheet.")
+    if SKIP_MERGE:
+        raise ValueError("`comparisons` needs the merged count matrices; remove skip_quantification_merge.")
+    _cond_n = Counter(e["condition"] for e in SAMPLES.values())
+    for _c in COMPARISONS:
+        b, t = str(_c["baseline"]), str(_c["treatment"])
+        if b == t:
+            raise ValueError(f"Comparison {_c}: baseline and treatment must differ.")
+        for _x in (b, t):
+            if _cond_n[_x] < 2:
+                raise ValueError(f"Comparison {_c}: condition {_x!r} needs at least 2 samples in the samplesheet "
+                                 f"(found {_cond_n[_x]}).")
+    _check(cfg("de_counts"), "de_counts", ["gene_counts_length_scaled", "gene_counts"])
+    _check(cfg("gsea_gene_id"), "gsea_gene_id", ["gene_name", "gene_id"])
+CONTRASTS = [f"{c['treatment']}_vs_{c['baseline']}" for c in COMPARISONS]
+GSEA_GMT = OrderedDict()  # GMT stem -> path
+for _g in config.get("gsea_gmt") or []:
+    _stem = re.sub(r"\.gmt$", "", os.path.basename(str(_g)))
+    if _stem in GSEA_GMT:
+        raise ValueError(f"Two gsea_gmt files share the name {_stem!r}.")
+    GSEA_GMT[_stem] = str(_g)
 
 # UMI extraction with umi_discard_read 1/2 keeps one mate, after which the
 # sample is treated as single-end (meta.single_end = true).
@@ -922,6 +973,19 @@ def quant_outputs(qdir, samples):
                 for x in ("gene_counts", "gene_tpm", "transcript_counts", "transcript_tpm", "genes_long", "isoforms_long")]
     if not SKIP_QC and not flag("skip_deseq2_qc"):
         out.append(f"{d}/deseq2_qc/deseq2.plots.pdf")
+    out += de_outputs(qdir)
+    return out
+
+
+def de_outputs(qdir):
+    """Differential expression, volcano and GSEA outputs (port extension)."""
+    d = f"{O}/{qdir}/differential"
+    out = []
+    if COMPARISONS:
+        out.append(f"{d}/deseq2.normalized_counts.tsv")
+        for c in CONTRASTS:
+            out += [f"{d}/{c}/{c}.deseq2.results.tsv", f"{d}/{c}/{c}.volcano.pdf"]
+            out += [f"{d}/{c}/gsea/{g}/gsea.results.tsv" for g in GSEA_GMT]
     return out
 
 
@@ -1146,6 +1210,7 @@ rule all:
 localrules:
     all,
     fetch_remote,
+    samplesheet_ids,
     link_fasta,
     trim_status,
     trim_summary,
@@ -3920,7 +3985,7 @@ def se_inputs(wc):
         mats = ["transcript_counts", "transcript_lengths", "transcript_tpm"]
         rowdata = f"{d}/{p}.tx2gene_augmented.tsv"
     return {"matrices": [f"{d}/{p}.{m}.tsv" for m in mats], "rowdata": rowdata,
-            "coldata": config["input"]}
+            "coldata": SHEET}
 
 
 rule summarizedexperiment:
@@ -3999,6 +4064,124 @@ rule deseq2_qc:
         mv size_factors {output.size_factors}
         mv {wildcards.qdir}.pca.vals_mqc.tsv {output.pca_mqc}
         mv {wildcards.qdir}.sample.dists_mqc.tsv {output.dists_mqc}
+        """
+
+
+# =============================================================================
+# Differential expression (port extension, not in nf-core/rnaseq 3.27.0):
+# PyDESeq2 per comparison, volcano/MA plots, preranked GSEA (GSEApy). Runs on
+# every quantification directory (salmon by default; star_rsem / kallisto /
+# pseudo_aligner chain the same way) when `comparisons` is set.
+# =============================================================================
+DE = f"{O}/{{qdir}}/differential"
+
+
+# Samplesheet with `sample` = <condition>_<sample> (only with a condition column).
+rule samplesheet_ids:
+    input:
+        config["input"],
+    output:
+        f"{W}/samplesheet.ids.csv",
+    run:
+        with open(input[0], newline="") as fh:
+            fields = csv.DictReader(fh).fieldnames
+        with open(output[0], "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fields, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(SHEET_ROWS)
+
+
+rule pydeseq2:
+    input:
+        counts=lambda wc: f"{O}/{wc.qdir}/{QUANT_TYPE[wc.qdir]}.merged.{config['de_counts']}.tsv",
+        samplesheet=SHEET,
+    output:
+        norm=f"{DE}/deseq2.normalized_counts.tsv",
+        vst=f"{DE}/deseq2.vst.tsv",
+        size_factors=f"{DE}/deseq2.size_factors.tsv",
+        pca=f"{DE}/deseq2.pca.pdf",
+        pca_tsv=f"{DE}/deseq2.pca.tsv",
+        results=[f"{DE}/{c}/{c}.deseq2.results.tsv" for c in CONTRASTS],
+        significant=[f"{DE}/{c}/{c}.deseq2.significant.tsv" for c in CONTRASTS],
+    params:
+        comparisons=" ".join(f"--comparison {c['baseline']}:{c['treatment']}" for c in COMPARISONS),
+        shrink="--shrink" if flag("de_lfc_shrink") else "",
+        min_counts=config.get("de_min_counts", 10),
+        padj=config.get("de_padj", 0.05),
+        lfc=config.get("de_lfc", 1.0),
+    log:
+        f"{DE}/deseq2.log",
+    container:
+        container_path("pydeseq2")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shell:
+        """
+        python3 {SCRIPTS}/pydeseq2_de.py --counts {input.counts} --samplesheet {input.samplesheet} \
+            {params.comparisons} --outdir $(dirname {output.norm}) --min-counts {params.min_counts} \
+            --padj {params.padj} --lfc {params.lfc} {params.shrink} --threads {threads} > {log} 2>&1
+        """
+
+
+rule volcano:
+    input:
+        f"{DE}/{{contrast}}/{{contrast}}.deseq2.results.tsv",
+    output:
+        pdf=f"{DE}/{{contrast}}/{{contrast}}.volcano.pdf",
+        png=f"{DE}/{{contrast}}/{{contrast}}.volcano.png",
+        ma=f"{DE}/{{contrast}}/{{contrast}}.ma.pdf",
+    wildcard_constraints:
+        contrast=alternation(CONTRASTS),
+    params:
+        padj=config.get("de_padj", 0.05),
+        lfc=config.get("de_lfc", 1.0),
+        top=config.get("de_label_top", 15),
+    container:
+        container_path("volcano")
+    threads: res("process_single")["threads"]
+    resources:
+        mem_mb=res("process_single")["mem_mb"],
+    shell:
+        """
+        python3 {SCRIPTS}/volcano.py --results {input} --title {wildcards.contrast} \
+            --volcano {output.pdf} --volcano-png {output.png} --ma {output.ma} \
+            --padj {params.padj} --lfc {params.lfc} --label-top {params.top}
+        """
+
+
+rule gsea_prerank:
+    input:
+        results=f"{DE}/{{contrast}}/{{contrast}}.deseq2.results.tsv",
+        gmt=lambda wc: GSEA_GMT[wc.gmt],
+    output:
+        results=f"{DE}/{{contrast}}/gsea/{{gmt}}/gsea.results.tsv",
+        rnk=f"{DE}/{{contrast}}/gsea/{{gmt}}/gsea.rnk",
+        top=f"{DE}/{{contrast}}/gsea/{{gmt}}/gsea.top_terms.pdf",
+        plots=directory(f"{DE}/{{contrast}}/gsea/{{gmt}}/enrichment_plots"),
+    wildcard_constraints:
+        contrast=alternation(CONTRASTS),
+        gmt=alternation(GSEA_GMT),
+    params:
+        gene_id=cfg("gsea_gene_id", "gene_name"),
+        min_size=config.get("gsea_min_size", 15),
+        max_size=config.get("gsea_max_size", 500),
+        perm=config.get("gsea_permutations", 1000),
+        seed=config.get("gsea_seed", 42),
+        top=config.get("gsea_top_terms", 10),
+    log:
+        f"{DE}/{{contrast}}/gsea/{{gmt}}/gsea.log",
+    container:
+        container_path("gseapy")
+    threads: res("process_medium")["threads"]
+    resources:
+        mem_mb=res("process_medium")["mem_mb"],
+    shell:
+        """
+        python3 {SCRIPTS}/gsea_prerank.py --results {input.results} --gmt {input.gmt} \
+            --outdir $(dirname {output.results}) --gene-id {params.gene_id} \
+            --min-size {params.min_size} --max-size {params.max_size} --permutations {params.perm} \
+            --seed {params.seed} --top-terms {params.top} --threads {threads} > {log} 2>&1
         """
 
 
@@ -4958,7 +5141,7 @@ def _opt(flag_name, files):
 rule multiqc_rnaseq_inputs:
     input:
         unpack(multiqc_side_inputs),
-        samplesheet=config["input"],
+        samplesheet=SHEET,
         summary=f"{ASSETS}/strand_check_summary.yaml",
         composition=f"{ASSETS}/strand_check_composition.yaml",
         header=f"{ASSETS}/sample_status_header.txt",

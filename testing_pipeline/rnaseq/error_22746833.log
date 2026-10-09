@@ -1,0 +1,158 @@
++ /lustre09/project/6007495/andygg98/pipelines/.venv/bin/snakemake --snakefile /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/Snakefile --directory /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq --configfile /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/config/config.yaml /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/config/containers.yaml /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/configs/rnaseq.config.yaml --cores 8 --sdm apptainer --apptainer-args '--bind /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq'
+Assuming unrestricted shared filesystem usage.
+
+SNAKEMAKE
+=========
+  Date: 2026-10-08 11:35:36
+  Workflow ID: eac66342-fc36-4726-9b67-d9d2cd88ba5b
+  Platform: Linux-5.14.0-687.52.1.el9_8.x86_64-x86_64-AMD_EPYC_9654_96-Core_Processor-with-glibc2.34
+  Host: rc31706
+  User: andygg98
+  Snakemake version: 9.27.0
+  Python version: 3.13.2 | packaged by Anaconda, Inc. | (main, Feb  6 2025, 18:56:02) [GCC 11.2.0]
+  Command: /lustre09/project/6007495/andygg98/pipelines/.venv/bin/snakemake --snakefile /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/Snakefile --directory /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq --configfile /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/config/config.yaml /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/config/containers.yaml /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/configs/rnaseq.config.yaml --cores 8 --sdm apptainer --apptainer-args --bind /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq
+  Snakefile: /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/Snakefile
+  Base directory: /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq
+  Run directory: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq
+  Working directory: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq
+  Config file(s): [PosixPath('/lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/config/config.yaml'), PosixPath('/lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/config/containers.yaml'), PosixPath('/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/configs/rnaseq.config.yaml')]
+  Config MD5: 3b40164be44513887c1b4e61dd27245f
+
+Building DAG of jobs...
+Using shell: /cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/bin/bash
+Provided cores: 8
+Rules claiming more threads will be scaled down.
+Job stats:
+job              count
+-------------  -------
+fq_lint              4
+trimgalore_pe        4
+trim_status          4
+trim_summary         1
+all                  1
+total               14
+
+Select jobs to execute...
+Execute 4 jobs...
+
+[Thu Oct  8 11:35:40 2026]
+localrule fq_lint:
+    input: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_unedited_R1.fastq.gz, /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_unedited_R2.fastq.gz
+    output: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep2.fq_lint.txt
+    jobid: 7
+    reason: Missing output files: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep2.fq_lint.txt
+    wildcards: lint_dir=raw, sample=Parental_rep2
+    threads: 2
+    resources: tmpdir=/tmp, mem_mb=12288, mem=12.29 GB, mem_mib=11719
+Activating singularity image /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/containers/depot.galaxyproject.org-singularity-fq-0.12.0--h9ee0642_0.img
+
+[Thu Oct  8 11:35:40 2026]
+localrule fq_lint:
+    input: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c19_R1.fastq.gz, /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c19_R2.fastq.gz
+    output: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c19.fq_lint.txt
+    jobid: 13
+    reason: Missing output files: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c19.fq_lint.txt
+    wildcards: lint_dir=raw, sample=NSD1KO_c19
+    threads: 2
+    resources: tmpdir=/tmp, mem_mb=12288, mem=12.29 GB, mem_mib=11719
+Activating singularity image /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/containers/depot.galaxyproject.org-singularity-fq-0.12.0--h9ee0642_0.img
+
+[Thu Oct  8 11:35:40 2026]
+localrule fq_lint:
+    input: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c17_R1.fastq.gz, /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c17_R2.fastq.gz
+    output: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c17.fq_lint.txt
+    jobid: 10
+    reason: Missing output files: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c17.fq_lint.txt
+    wildcards: lint_dir=raw, sample=NSD1KO_c17
+    threads: 2
+    resources: tmpdir=/tmp, mem_mb=12288, mem=12.29 GB, mem_mib=11719
+Activating singularity image /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/containers/depot.galaxyproject.org-singularity-fq-0.12.0--h9ee0642_0.img
+
+[Thu Oct  8 11:35:40 2026]
+localrule fq_lint:
+    input: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_R1.fastq.gz, /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_R2.fastq.gz
+    output: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep1.fq_lint.txt
+    jobid: 4
+    reason: Missing output files: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep1.fq_lint.txt
+    wildcards: lint_dir=raw, sample=Parental_rep1
+    threads: 2
+    resources: tmpdir=/tmp, mem_mb=12288, mem=12.29 GB, mem_mib=11719
+Activating singularity image /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/containers/depot.galaxyproject.org-singularity-fq-0.12.0--h9ee0642_0.img
+Error: could not open file: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_R1.fastq.gz
+
+Caused by:
+    No such file or directory (os error 2)
+Error: could not open file: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c19_R1.fastq.gz
+
+Caused by:
+    No such file or directory (os error 2)
+Error: could not open file: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_unedited_R1.fastq.gz
+
+Caused by:
+    No such file or directory (os error 2)
+Error: could not open file: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c17_R1.fastq.gz
+
+Caused by:
+    No such file or directory (os error 2)
+RuleException:
+CalledProcessError in file "/lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/Snakefile", line 1909:
+Command ' apptainer  exec --home '/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq' --bind /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq --bind '/home/andygg98/.cache/snakemake/snakemake/source-cache' /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/containers/depot.galaxyproject.org-singularity-fq-0.12.0--h9ee0642_0.img bash -c 'set -euo pipefail; export PYTHONNOUSERSITE=1 R_PROFILE_USER=/.Rprofile R_ENVIRON_USER=/.Renviron MPLCONFIGDIR=${TMPDIR:-/tmp}/mplcfg;  fq lint --disable-validator P001 /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_unedited_R1.fastq.gz /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_unedited_R2.fastq.gz > /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep2.fq_lint.txt'' returned non-zero exit status 1.
+[Thu Oct  8 11:35:41 2026]
+Error in rule fq_lint:
+    message: None
+    jobid: 7
+    input: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_unedited_R1.fastq.gz, /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_unedited_R2.fastq.gz
+    output: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep2.fq_lint.txt
+    shell:
+        fq lint --disable-validator P001 /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_unedited_R1.fastq.gz /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_unedited_R2.fastq.gz > /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep2.fq_lint.txt
+        (command exited with non-zero exit code)
+RuleException:
+CalledProcessError in file "/lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/Snakefile", line 1909:
+Command ' apptainer  exec --home '/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq' --bind /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq --bind '/home/andygg98/.cache/snakemake/snakemake/source-cache' /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/containers/depot.galaxyproject.org-singularity-fq-0.12.0--h9ee0642_0.img bash -c 'set -euo pipefail; export PYTHONNOUSERSITE=1 R_PROFILE_USER=/.Rprofile R_ENVIRON_USER=/.Renviron MPLCONFIGDIR=${TMPDIR:-/tmp}/mplcfg;  fq lint --disable-validator P001 /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c19_R1.fastq.gz /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c19_R2.fastq.gz > /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c19.fq_lint.txt'' returned non-zero exit status 1.
+[Thu Oct  8 11:35:41 2026]
+Error in rule fq_lint:
+    message: None
+    jobid: 13
+    input: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c19_R1.fastq.gz, /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c19_R2.fastq.gz
+    output: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c19.fq_lint.txt
+    shell:
+        fq lint --disable-validator P001 /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c19_R1.fastq.gz /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c19_R2.fastq.gz > /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c19.fq_lint.txt
+        (command exited with non-zero exit code)
+RuleException:
+CalledProcessError in file "/lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/Snakefile", line 1909:
+Command ' apptainer  exec --home '/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq' --bind /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq --bind '/home/andygg98/.cache/snakemake/snakemake/source-cache' /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/containers/depot.galaxyproject.org-singularity-fq-0.12.0--h9ee0642_0.img bash -c 'set -euo pipefail; export PYTHONNOUSERSITE=1 R_PROFILE_USER=/.Rprofile R_ENVIRON_USER=/.Renviron MPLCONFIGDIR=${TMPDIR:-/tmp}/mplcfg;  fq lint --disable-validator P001 /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c17_R1.fastq.gz /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c17_R2.fastq.gz > /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c17.fq_lint.txt'' returned non-zero exit status 1.
+RuleException:
+CalledProcessError in file "/lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/Snakefile", line 1909:
+Command ' apptainer  exec --home '/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq' --bind /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq --bind '/home/andygg98/.cache/snakemake/snakemake/source-cache' /lustre09/project/6007495/andygg98/pipelines/snk-rnaseq/containers/depot.galaxyproject.org-singularity-fq-0.12.0--h9ee0642_0.img bash -c 'set -euo pipefail; export PYTHONNOUSERSITE=1 R_PROFILE_USER=/.Rprofile R_ENVIRON_USER=/.Renviron MPLCONFIGDIR=${TMPDIR:-/tmp}/mplcfg;  fq lint --disable-validator P001 /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_R1.fastq.gz /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_R2.fastq.gz > /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep1.fq_lint.txt'' returned non-zero exit status 1.
+[Thu Oct  8 11:35:41 2026]
+Error in rule fq_lint:
+    message: None
+    jobid: 10
+    input: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c17_R1.fastq.gz, /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c17_R2.fastq.gz
+    output: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c17.fq_lint.txt
+    shell:
+        fq lint --disable-validator P001 /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c17_R1.fastq.gz /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_NSD1KO_c17_R2.fastq.gz > /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c17.fq_lint.txt
+        (command exited with non-zero exit code)
+[Thu Oct  8 11:35:41 2026]
+Error in rule fq_lint:
+    message: None
+    jobid: 4
+    input: /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_R1.fastq.gz, /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_R2.fastq.gz
+    output: /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep1.fq_lint.txt
+    shell:
+        fq lint --disable-validator P001 /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_R1.fastq.gz /home/andygg98/links/projects/rrg-majewski-ab/shared/projects/cell_lines/10Ts/RNAseq/MAJ2239/reads_maj2239/10T_Parental_R2.fastq.gz > /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep1.fq_lint.txt
+        (command exited with non-zero exit code)
+Removing output files of failed job fq_lint since they might be corrupted:
+/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep2.fq_lint.txt
+Removing output files of failed job fq_lint since they might be corrupted:
+/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c19.fq_lint.txt
+Removing output files of failed job fq_lint since they might be corrupted:
+/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/NSD1KO_c17.fq_lint.txt
+Removing output files of failed job fq_lint since they might be corrupted:
+/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir/fq_lint/raw/Parental_rep1.fq_lint.txt
+Shutting down, this might take some time.
+Exiting because a job execution failed. Look above for error messages
+Complete log(s): /lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/.snakemake/log/2026-10-08T113536.177721.snakemake.log
+Elapsed time: 0:00:05.190609
+WorkflowError:
+At least one job did not complete successfully.

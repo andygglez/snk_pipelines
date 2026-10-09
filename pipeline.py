@@ -232,6 +232,9 @@ def cmd_pull(args):
             print(f"[{i}/{len(miss)}] {key}: no URL in container_urls; skipped")
             failed.append(key)
             continue
+        if os.path.isfile(path):  # shared with a key pulled earlier in this loop
+            print(f"[{i}/{len(miss)}] {key}: already pulled ({os.path.basename(path)})")
+            continue
         print(f"[{i}/{len(miss)}] {key}: {url}", flush=True)
         if args.dry_run:
             continue

@@ -1,0 +1,11 @@
+# Port extension (no nf-core counterpart): differential expression + GSEA on the
+# test data. Sample IDs are unchanged (WT + REP1 -> WT_REP1). RAP1_IAA_30M has a
+# single sample, so it cannot be compared. The GMT holds toy positional gene sets
+# built from the test GTF gene names (sizes 20 and 62).
+input: "config/samplesheet_test_de.csv"
+comparisons:
+  - {baseline: "WT", treatment: "RAP1_UNINDUCED"}
+gsea_gmt:
+  - "config/scenarios/DE_test.gmt"
+gsea_min_size: 5
+gsea_permutations: 100

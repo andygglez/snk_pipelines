@@ -6,20 +6,18 @@
 # =============================================================================
 
 # ---- Input / output ---------------------------------------------------------
-# CSV with header: [condition,]sample,fastq_1,fastq_2,strandedness[,seq_platform,seq_center,
+# CSV with header: sample,fastq_1,fastq_2,strandedness[,seq_platform,seq_center,
 # genome_bam,transcriptome_bam,percent_mapped]
-# With a `condition` column (port extension), the sample ID is <condition>_<sample>
-# (Parental + rep1 -> Parental_rep1); `comparisons` below use the conditions.
 # Several rows per sample = several runs, concatenated by CAT_FASTQ.
 # strandedness: forward | reverse | unstranded | auto (inferred with Salmon).
 # genome_bam / transcriptome_bam / percent_mapped: pre-aligned BAMs, only used
 # with skip_alignment (they replace the alignment step).
 # Paths may be local or http(s)/ftp URLs.
-input: "config/samplesheet.csv"  ### <path to samplesheet CSV>
-outdir: "results"            ### <directory>
+input: "/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/configs/samplesheet.csv"  ### <path to samplesheet CSV>
+outdir: "/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/outdir"            ### <directory>
 # Intermediate files that nf-core keeps in its work/ directory. Kept outside
 # outdir so outdir mirrors the nf-core publishDir layout file for file.
-workdir: "work"              ### <directory>
+workdir: "/lustre09/project/6007495/andygg98/testing_pipelines/rnaseq/workdir"              ### <directory>
 
 # ---- References -------------------------------------------------------------
 # iGenomes: `genome` fills every reference parameter left empty from
@@ -27,8 +25,8 @@ workdir: "work"              ### <directory>
 genome: ""                   ### <iGenomes key, e.g. "GRCh38", or "">
 igenomes_base: "s3://ngi-igenomes/igenomes/"  ### <local iGenomes mirror, or the default (HTTPS mirror of the S3 bucket)>
 igenomes_ignore: false       ### [true, false]  # do not load config/igenomes.yaml
-fasta: ""                    ### <path or URL: .fa/.fasta(.gz), or "">  # Genome FASTA (.gz allowed). Required unless skip_alignment with transcript_fasta or a pseudo-aligner index
-gtf: ""                      ### <path or URL: .gtf(.gz), or "" if gff is set>  # GTF (.gz allowed). Either gtf or gff is required.
+fasta: "/home/andygg98/references/mm10/mm10.fa"                    ### <path or URL: .fa/.fasta(.gz)>  # Genome FASTA (.gz allowed). Required.
+gtf: "/home/andygg98/references/mm10/mm10.gtf"                      ### <path or URL: .gtf(.gz), or "" if gff is set>  # GTF (.gz allowed). Either gtf or gff is required.
 gff: ""                      ### <path or URL: .gff/.gff3(.gz), or "">  # GFF3, converted to GTF with gffread if gtf is empty
 additional_fasta: ""         ### <path or URL: .fa/.fasta(.gz), or "">  # Extra sequences (e.g. spike-ins) appended to genome and GTF
 transcript_fasta: ""         ### <path or URL: .fa/.fasta(.gz), or "" to build>  # Transcriptome FASTA; built with rsem-prepare-reference if empty
@@ -145,7 +143,6 @@ skip_biotype_qc: false       ### [true, false]
 skip_deseq2_qc: false        ### [true, false]
 skip_multiqc: false          ### [true, false]
 deseq2_vst: true             ### [true, false]
-
 rseqc_modules: "bam_stat,inner_distance,infer_experiment,junction_annotation,junction_saturation,read_distribution,read_duplication"  ### <comma-separated, any of: bam_stat, inner_distance, infer_experiment, junction_annotation, junction_saturation, read_distribution, read_duplication, tin>
 contaminant_screening: ""    ### ["", "kraken2", "kraken2_bracken", "sylph"]
 contaminant_screening_input: "unmapped"  ### ["unmapped", "trimmed", "trim_only", "raw"]
@@ -155,29 +152,6 @@ bracken_precision: "S"       ### ["D", "P", "C", "O", "F", "G", "S"]
 sylph_db: ""                 ### <comma-separated paths/URLs of .syldb databases, or "">
 sylph_taxonomy: ""           ### <comma-separated paths/URLs of sylph-tax metadata, or "">
 use_rustqc: false            ### [true, false]  # RustQC instead of Preseq/featureCounts/Qualimap/dupRadar/RSeQC
-
-# ---- Differential expression (port extension, not in nf-core/rnaseq) ------------
-# PyDESeq2 (design ~condition) on the merged gene table of every quantification
-# (salmon by default; star_rsem / kallisto / pseudo_aligner the same way), then
-# volcano/MA plots and preranked GSEA. Off while `comparisons` is empty. Needs a
-# `condition` column in the samplesheet and at least 2 samples per condition.
-# Outputs: <outdir>/<quant dir>/differential/<treatment>_vs_<baseline>/
-comparisons: []              ### <list of {baseline: <condition>, treatment: <condition>}>
-#  - {baseline: "Parental", treatment: "NSD2KO"}
-#  - {baseline: "Parental", treatment: "NSD1KO"}
-de_counts: gene_counts_length_scaled  ### ["gene_counts_length_scaled", "gene_counts"]  # tximport table, rounded to integers
-de_min_counts: 10            ### <integer>  # drop genes with fewer total reads
-de_padj: 0.05                ### <float>  # adjusted p-value cutoff (also DESeq2 alpha)
-de_lfc: 1.0                  ### <float>  # |log2FC| cutoff for the significant table and volcano
-de_lfc_shrink: true          ### [true, false]  # report shrunk log2FC (PyDESeq2 lfc_shrink); stat/p-values are unshrunk
-de_label_top: 15             ### <integer>  # genes labelled on the volcano
-gsea_gmt: []                 ### <list of local .gmt files>  # empty = no GSEA (compute nodes are offline: no MSigDB download)
-gsea_gene_id: gene_name      ### ["gene_name", "gene_id"]  # identifier used in the GMT files
-gsea_min_size: 15            ### <integer>
-gsea_max_size: 500           ### <integer>
-gsea_permutations: 1000      ### <integer>
-gsea_seed: 42                ### <integer>
-gsea_top_terms: 10           ### <integer>  # terms drawn in the dot plot and enrichment plots
 
 # ---- MultiQC ----------------------------------------------------------------
 multiqc_config: ""           ### <path to YAML, or "">  # extra user config, added after assets/multiqc_config.yml

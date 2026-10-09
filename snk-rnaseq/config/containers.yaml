@@ -106,6 +106,12 @@ containers:
   # PARABRICKS_RNA_FQ2BAM (GPU; Docker-only image: `apptainer pull <this path> docker://nvcr.io/nvidia/clara/clara-parabricks:4.7.1-1`)
   parabricks: containers/clara-parabricks-4.7.1-1.sif
 
+  # Port extension, not an nf-core module image: differential expression
+  # (PyDESeq2 + volcano/MA plots) and preranked GSEA (GSEApy).
+  pydeseq2: containers/depot.galaxyproject.org-singularity-pydeseq2-0.5.4--pyhdfd78af_0.img
+  volcano: containers/depot.galaxyproject.org-singularity-pydeseq2-0.5.4--pyhdfd78af_0.img
+  gseapy: containers/depot.galaxyproject.org-singularity-gseapy-1.3.1--py312he7d644a_0.img
+
 # Where each image above comes from (the URL the nf-core module pins).
 # `pipeline pull <name>` downloads any missing image from here; it has no
 # effect on runs. Compute nodes are offline, so pull on a login node first.
@@ -161,3 +167,7 @@ container_urls:
   star_parabricks: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/90/90e5dfb6f785d74101a62b11668bb53a7020647ddda2df959c7c18023ee5c591/data
   ribodetector_gpu: https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/51/51100097fc2e31d7b78074bc954774f77726099220e820382e939278817a66da/data
   parabricks: docker://nvcr.io/nvidia/clara/clara-parabricks:4.7.1-1
+  # Port extension (differential expression / GSEA), not nf-core modules.
+  pydeseq2: https://depot.galaxyproject.org/singularity/pydeseq2:0.5.4--pyhdfd78af_0
+  volcano: https://depot.galaxyproject.org/singularity/pydeseq2:0.5.4--pyhdfd78af_0
+  gseapy: https://depot.galaxyproject.org/singularity/gseapy:1.3.1--py312he7d644a_0
