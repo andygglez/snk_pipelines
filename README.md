@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="documentation/logo/logo.jpeg" alt="Snakemake ports of nf-core pipelines logo" width="400">
+</p>
+
 # Snakemake ports of nf-core pipelines
 
 This repository reimplements nf-core Nextflow pipelines in Snakemake. Every step
