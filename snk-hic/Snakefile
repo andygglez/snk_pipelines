@@ -146,7 +146,14 @@ MAP_RES = sorted(set(
 ))
 # nf-core zoomifies every res_zoomify value into the same <sample>.mcool;
 # here the finest one is used as the base resolution (see COOLER subworkflow).
-ZOOMIFY_RES = min(as_list(config["res_zoomify"]) or MAP_RES)
+# Port extension: `mcool_resolutions` fixes the mcool levels (zoomify -r); its
+# smallest value is the base resolution and overrides res_zoomify.
+MCOOL_RES = sorted(set(as_list(config.get("mcool_resolutions"))))
+ZOOMIFY_RES = min(MCOOL_RES or as_list(config["res_zoomify"]) or MAP_RES)
+if any(r % ZOOMIFY_RES for r in MCOOL_RES):
+    raise ValueError(
+        f"Every `mcool_resolutions` value must be a multiple of the base resolution {ZOOMIFY_RES}."
+    )
 TADS_CALLER = config["tads_caller"]
 if isinstance(TADS_CALLER, str):
     TADS_CALLER = TADS_CALLER.split(",")
@@ -225,7 +232,10 @@ def all_outputs(wc):
         ]
         if config["save_raw_maps"]:
             out += expand(f"{COOLDIR}/{s}.{{res}}.cool", res=MAP_RES)
-        out += expand(f"{COOLDIR}/{s}.{{res}}_balanced.cool", res=MAP_RES)
+        # Port extension: the per-resolution balanced cools are only published
+        # with save_balanced_cools (nf-core always publishes them).
+        if config.get("save_balanced_cools"):
+            out += expand(f"{COOLDIR}/{s}.{{res}}_balanced.cool", res=MAP_RES)
         out += expand(f"{O}/contact_maps/txt/{s}.{{res}}_balanced.txt", res=MAP_RES)
         if config["save_raw_maps"]:
             out += expand(f"{O}/contact_maps/txt/{s}.{{res}}_raw.txt", res=MAP_RES)
@@ -848,7 +858,7 @@ rule cooler_balance:
     input:
         f"{COOLDIR}/{{sample}}.{{res}}.cool",
     output:
-        f"{COOLDIR}/{{sample}}.{{res}}_balanced.cool",
+        maybe_temp(f"{COOLDIR}/{{sample}}.{{res}}_balanced.cool", config.get("save_balanced_cools")),
     params:
         args=config["cooler_balance_args"],
     container:
@@ -864,6 +874,8 @@ rule cooler_balance:
 
 
 # COOLER_ZOOMIFY (from the raw, unbalanced cool at the base resolution)
+# Port extension: with mcool_resolutions, exactly those levels (-r) go into
+# the one <sample>.mcool; otherwise cooler's default series, as in nf-core.
 rule cooler_zoomify:
     input:
         f"{COOLDIR}/{{sample}}.{ZOOMIFY_RES}.cool",
@@ -871,13 +883,14 @@ rule cooler_zoomify:
         f"{COOLDIR}/{{sample}}.mcool",
     params:
         args=config["cooler_zoomify_args"],
+        res=f"-r {','.join(map(str, MCOOL_RES))}" if MCOOL_RES else "",
     container:
         container_path("cooler")
     threads: res("single")["threads"]
     resources:
         mem_mb=res("single")["mem_mb"],
     shell:
-        "cooler zoomify {params.args} -n {threads} -o {output} {input}"
+        "cooler zoomify {params.args} {params.res} -n {threads} -o {output} {input}"
 
 
 # COOLER_DUMP
