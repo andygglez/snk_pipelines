@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Volcano and MA plots of a PyDESeq2 results table (port extension).
 
-Usage: volcano.py --results <c>.deseq2.results.tsv --title <c> --volcano <pdf>
+Usage: volcano.py --results <c>.deseq2.results.csv --title <c> --volcano <pdf>
                   --volcano-png <png> --ma <pdf> [--padj 0.05] [--lfc 1] [--label-top 15]
 """
 
@@ -34,7 +34,7 @@ def main():
     ap.add_argument("--label-top", type=int, default=15)
     args = ap.parse_args()
 
-    res = pd.read_csv(args.results, sep="\t")
+    res = pd.read_csv(args.results)  # <contrast>.deseq2.results.csv
     res = res[res["log2FoldChange"].notna()].copy()
     res["label"] = res["gene_name"].fillna(res["gene_id"]).astype(str)
     res["cls"] = classify(res, args.padj, args.lfc)

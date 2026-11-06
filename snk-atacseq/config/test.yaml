@@ -2,7 +2,6 @@
 # Usage: snakemake --cores 2 --sdm apptainer --configfile config/test.yaml
 input: "config/samplesheet.csv"
 outdir: "results_test"
-workdir: "work_test"
 
 read_length: 50
 mito_name: "MT"

@@ -65,6 +65,7 @@ IGENOME = apply_igenomes()
 
 SCRIPTS = os.path.join(workflow.basedir, "scripts")
 O = config["outdir"].rstrip("/")
+W = (config.get("workdir") or f"{O}/temp_workdir").rstrip("/")
 
 
 # -----------------------------------------------------------------------------
@@ -391,10 +392,10 @@ rule fastqc:
         r1=lambda wc: chunk_pairs(wc.sample)[int(wc.chunk)][0],
         r2=lambda wc: chunk_pairs(wc.sample)[int(wc.chunk)][1],
     output:
-        html1=f"{O}/work/fastqc/{{sample}}/{{chunk}}/{{sample}}_1_fastqc.html",
-        zip1=f"{O}/work/fastqc/{{sample}}/{{chunk}}/{{sample}}_1_fastqc.zip",
-        html2=f"{O}/work/fastqc/{{sample}}/{{chunk}}/{{sample}}_2_fastqc.html",
-        zip2=f"{O}/work/fastqc/{{sample}}/{{chunk}}/{{sample}}_2_fastqc.zip",
+        html1=f"{W}/fastqc/{{sample}}/{{chunk}}/{{sample}}_1_fastqc.html",
+        zip1=f"{W}/fastqc/{{sample}}/{{chunk}}/{{sample}}_1_fastqc.zip",
+        html2=f"{W}/fastqc/{{sample}}/{{chunk}}/{{sample}}_2_fastqc.html",
+        zip2=f"{W}/fastqc/{{sample}}/{{chunk}}/{{sample}}_2_fastqc.zip",
     container:
         container_path("fastqc")
     threads: res("medium")["threads"]
@@ -415,7 +416,7 @@ rule fastqc:
 
 rule fastqc_publish:
     input:
-        lambda wc: f"{O}/work/fastqc/{wc.sample}/{list(chunks(wc.sample))[-1]}/{wc.sample}_{wc.r}_fastqc.{wc.ext}",
+        lambda wc: f"{W}/fastqc/{wc.sample}/{list(chunks(wc.sample))[-1]}/{wc.sample}_{wc.r}_fastqc.{wc.ext}",
     output:
         f"{O}/fastqc/{{sample}}_{{r}}_fastqc.{{ext}}",
     wildcard_constraints:
@@ -1029,7 +1030,7 @@ rule hic_find_tads:
 # and the version commands of its module; each command runs in the image of the
 # rule that ran it. Snakemake replaces Nextflow in the Workflow section.
 VERSIONS_YML = f"{O}/pipeline_info/software_versions.yml"
-VERSIONS_MQC = f"{O}/work/versions/software_versions_mqc.yml"
+VERSIONS_MQC = f"{W}/versions/software_versions_mqc.yml"
 
 
 def versions_inputs(wc):
@@ -1065,7 +1066,7 @@ rule software_versions:
 rule multiqc:
     input:
         fastqc=lambda wc: [
-            f"{O}/work/fastqc/{s}/{c}/{s}_{r}_fastqc.zip" for s in SAMPLES for c in chunks(s) for r in (1, 2)
+            f"{W}/fastqc/{s}/{c}/{s}_{r}_fastqc.zip" for s in SAMPLES for c in chunks(s) for r in (1, 2)
         ],
         stats=lambda wc: [
             f

@@ -101,7 +101,7 @@ from rnaseq_strand import (  # noqa: E402
 )
 
 O = config["outdir"].rstrip("/")
-W = config["workdir"].rstrip("/")
+W = (config.get("workdir") or f"{O}/temp_workdir").rstrip("/")
 
 # nextflow.config env{} and process.shell (bash -e -u -o pipefail).
 shell.prefix(
@@ -527,6 +527,10 @@ def mem_gb(text):
 # the DESeq2 design factor of the differential-expression rules.
 SAMPLES = OrderedDict()
 SHEET_ROWS = []  # samplesheet rows with `sample` replaced by the sample ID
+# Port extension: `strandedness` in config.yaml fills empty / missing samplesheet
+# cells (the column is optional); a value in the samplesheet wins.
+DEFAULT_STRAND = str(config.get("strandedness") or "auto").strip()
+_check(DEFAULT_STRAND, "strandedness", ["auto", "forward", "reverse", "unstranded"])
 with open(config["input"], newline="") as fh:
     _reader = csv.DictReader(fh)
     HAS_CONDITION = "condition" in (_reader.fieldnames or [])
@@ -544,7 +548,7 @@ with open(config["input"], newline="") as fh:
         SHEET_ROWS.append(dict(row, sample=sample))
         fq1, fq2 = (row.get("fastq_1") or "").strip(), (row.get("fastq_2") or "").strip()
         meta = {
-            "strandedness": (row.get("strandedness") or "auto").strip(),
+            "strandedness": (row.get("strandedness") or "").strip() or DEFAULT_STRAND,
             "single_end": not fq2,
             "seq_platform": (row.get("seq_platform") or "").strip(),
             "seq_center": (row.get("seq_center") or "").strip(),
@@ -984,7 +988,7 @@ def de_outputs(qdir):
     if COMPARISONS:
         out.append(f"{d}/deseq2.normalized_counts.tsv")
         for c in CONTRASTS:
-            out += [f"{d}/{c}/{c}.deseq2.results.tsv", f"{d}/{c}/{c}.volcano.pdf"]
+            out += [f"{d}/{c}/{c}.deseq2.results.csv", f"{d}/{c}/{c}.volcano.pdf"]
             out += [f"{d}/{c}/gsea/{g}/gsea.results.tsv" for g in GSEA_GMT]
     return out
 
@@ -4101,8 +4105,8 @@ rule pydeseq2:
         size_factors=f"{DE}/deseq2.size_factors.tsv",
         pca=f"{DE}/deseq2.pca.pdf",
         pca_tsv=f"{DE}/deseq2.pca.tsv",
-        results=[f"{DE}/{c}/{c}.deseq2.results.tsv" for c in CONTRASTS],
-        significant=[f"{DE}/{c}/{c}.deseq2.significant.tsv" for c in CONTRASTS],
+        results=[f"{DE}/{c}/{c}.deseq2.results.csv" for c in CONTRASTS],
+        significant=[f"{DE}/{c}/{c}.deseq2.significant.csv" for c in CONTRASTS],
     params:
         comparisons=" ".join(f"--comparison {c['baseline']}:{c['treatment']}" for c in COMPARISONS),
         shrink="--shrink" if flag("de_lfc_shrink") else "",
@@ -4126,7 +4130,7 @@ rule pydeseq2:
 
 rule volcano:
     input:
-        f"{DE}/{{contrast}}/{{contrast}}.deseq2.results.tsv",
+        f"{DE}/{{contrast}}/{{contrast}}.deseq2.results.csv",
     output:
         pdf=f"{DE}/{{contrast}}/{{contrast}}.volcano.pdf",
         png=f"{DE}/{{contrast}}/{{contrast}}.volcano.png",
@@ -4152,7 +4156,7 @@ rule volcano:
 
 rule gsea_prerank:
     input:
-        results=f"{DE}/{{contrast}}/{{contrast}}.deseq2.results.tsv",
+        results=f"{DE}/{{contrast}}/{{contrast}}.deseq2.results.csv",
         gmt=lambda wc: GSEA_GMT[wc.gmt],
     output:
         results=f"{DE}/{{contrast}}/gsea/{{gmt}}/gsea.results.tsv",

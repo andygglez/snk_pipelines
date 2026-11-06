@@ -3,7 +3,6 @@
 # Offline copy for Rorqual compute nodes (pre-downloaded test data in /scratch/andygg98/claude_jobs/methylseq_testdata/).
 input: "config/samplesheet_local.csv"
 outdir: "results_test"
-workdir: "work_test"
 
 fasta: "/scratch/andygg98/claude_jobs/methylseq_testdata/genome.fa.gz"
 fasta_index: "/scratch/andygg98/claude_jobs/methylseq_testdata/genome.fa.fai"

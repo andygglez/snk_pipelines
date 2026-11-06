@@ -20,9 +20,12 @@
 # Run:  snakemake --cores N --sdm apptainer
 # =============================================================================
 
+import csv
+import io
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import urllib.request
@@ -87,7 +90,7 @@ from chipseq_utils import (  # noqa: E402
 import check_samplesheet  # noqa: E402
 
 O = config["outdir"].rstrip("/")
-W = config["workdir"].rstrip("/")
+W = (config.get("workdir") or f"{O}/temp_workdir").rstrip("/")
 
 # nextflow.config env{} and process.shell (bash -e -u -o pipefail).
 # HPC hosts (Lmod) export a `which` shell function that leaks into containers
@@ -201,7 +204,44 @@ if not param("gtf") and not param("gff"):
 if not param("macs_gsize") and not param("read_length"):
     raise ValueError("Either `macs_gsize` or `read_length` (for khmer unique-kmers) is required.")
 
-NARROW = flag("narrow_peak")
+# -----------------------------------------------------------------------------
+# Samplesheet format (port extension). Two formats, told apart by the header:
+#  * nf-core: sample,fastq_1,fastq_2,replicate,antibody,control,control_replicate.
+#    Runs exactly as nf-core/chipseq 2.1.0 (nf-core file names, .bigWig, IGV
+#    session, `narrow_peak` sets the MACS3 mode of every IP), so it can still be
+#    validated against nf-core.
+#  * port: condition,protein,rep,type,fastq1,fastq2,scale_factor (only condition,
+#    protein, rep and fastq1 are required; see read_port_samplesheet below).
+#    Sample IDs are <condition>_<protein>_<rep>; peaks are called (MACS3 narrow)
+#    only for type=narrow; bigWigs are .bw scaled by scale_factor; BAM suffixes
+#    are .lib / .merged_lib / .markedDup / .filtered / .final; no IGV session.
+# -----------------------------------------------------------------------------
+def _sheet_header(path):
+    lines = read_text(path).splitlines()
+    return [c.strip().lower() for c in lines[0].split(",")] if lines else []
+
+
+NEW_SHEET = {"condition", "protein"} <= set(_sheet_header(config["input"]))
+# File-name stems of the BAM chain (and what is derived from it):
+#   LBR  aligner output (unsorted)        LBS  library, sorted      LB   library prefix (logs, unmapped reads)
+#   MRG  runs merged                      MKDS duplicates marked    MKDP duplicates marked (Preseq prefix)
+#   FLTS filtered (PE)                    FLTN filtered, name-sorted (PE)
+#   CLNR orphans removed, unsorted (PE)   CLNS final clean BAM      CLNP final (QC/plot prefix)
+#   COV  coverage (bedGraph/scale) prefix BW   bigWig extension
+if NEW_SHEET:
+    LBR, LBS, LB = "lib.unsorted", "lib", "lib"
+    MRG, MKDS, MKDP = "merged_lib", "markedDup", "markedDup"
+    FLTS, FLTN = "filtered", "filtered.name_sorted"
+    CLNR, CLNS, CLNP, COV, BW = "final.unsorted", "final", "final", "final", "bw"
+else:
+    LBR, LBS, LB = "Lb", "Lb.sorted", "Lb"
+    MRG, MKDS, MKDP = "mLb.sorted", "mLb.mkD.sorted", "mLb.mkD"
+    FLTS, FLTN = "mLb.flT.sorted", "mLb.flT.name_sorted"
+    CLNR, CLNS, CLNP, COV, BW = "mLb.clN", "mLb.clN.sorted", "mLb.clN", "mLB.clN", "bigWig"
+CLEAN_SUFFIX = f".{CLNS}.bam"
+
+NARROW = True if NEW_SHEET else flag("narrow_peak")
+SKIP_IGV = NEW_SHEET or flag("skip_igv")
 PEAK_TYPE = "narrow_peak" if NARROW else "broad_peak"
 PEAK_EXT = "narrowPeak" if NARROW else "broadPeak"
 SAVE_REF = flag("save_reference")
@@ -216,9 +256,15 @@ INDEX_DIR = f"{O}/genome/index" if SAVE_REF else f"{W}/genome/index"
 AL = f"{O}/{ALIGNER}"
 ML = f"{AL}/merged_library"
 MACS = f"{ML}/macs3/{PEAK_TYPE}"
+BW_REP = f"{ML}/bigwig/replicate_bws" if NEW_SHEET else f"{ML}/bigwig"
+BW_SMP = f"{ML}/bigwig/sample_bws"          # port sheets only
+HEATMAP = f"{ML}/deepTools/heatmaps"         # port sheets only
+HEATMAP_KINDS = ("replicate", "replicate_scaled", "sample", "sample_scaled")
 LIB_DIR = f"{AL}/library" if SAVE_ALIGN else f"{W}/{ALIGNER}/library"
 MRG_DIR = ML if SAVE_ALIGN else f"{W}/{ALIGNER}/merged_library"
 TRIM_DIR = f"{O}/trimgalore" if flag("save_trimmed") else f"{W}/trimgalore"
+# Port sheets: one MultiQC report (peaks are narrow-only, so no broad/narrow split)
+MQC_DIR = f"{O}/multiqc" if NEW_SHEET else f"{O}/multiqc/{PEAK_TYPE}"
 
 # -----------------------------------------------------------------------------
 # Reference files (PREPARE_GENOME)
@@ -253,6 +299,13 @@ GTF_NAME = os.path.basename(GTF)
 BLACKLIST = gunzipped(config["blacklist"]) if param("blacklist") else None
 GENE_BED = gunzipped(config["gene_bed"]) if param("gene_bed") else f"{GENOME_DIR}/{basename_noext(GTF)}.bed"
 GENE_BED_NAME = os.path.basename(GENE_BED)
+# Port sheets: enhancer regions for the per-protein heatmaps (empty = no enhancer plots)
+ENHANCER_BED = gunzipped(config["enhancer_bed"]) if NEW_SHEET and param("enhancer_bed") else None
+# Port sheets: intergenic regions for the heatmaps. `intergenic_bed` from the config
+# when given; otherwise the complement of the gene BED (built by intergenic_bed).
+BUILD_INTERGENIC = NEW_SHEET and not param("intergenic_bed")
+INTERGENIC_BED = (gunzipped(config["intergenic_bed"]) if param("intergenic_bed")
+                  else f"{GENOME_DIR}/{basename_noext(GENE_BED)}.intergenic.bed")
 FILTERED_BED = f"{GENOME_DIR}/{simple_name(SIZES)}.include_regions.bed"
 
 # Indices: provided directory/file, .tar.gz (UNTAR_*), or built.
@@ -300,28 +353,137 @@ INDEX = {
 # (<sample>_REP<n>_T<m>) the DAG needs; the samplesheet_check rule runs it again
 # in its container to publish samplesheet.valid.csv.
 INPUT = stage(config["input"]) if is_url(config["input"]) else config["input"]
-with tempfile.TemporaryDirectory() as _tmp:
-    _raw = os.path.join(_tmp, "samplesheet.csv")
-    with open(_raw, "w") as fh:
-        fh.write(read_text(config["input"]))
-    _valid = os.path.join(_tmp, "samplesheet.valid.csv")
-    try:
-        check_samplesheet.check_samplesheet(_raw, _valid)
-    except SystemExit as e:
-        raise ValueError(f"Samplesheet check failed for {config['input']} (see message above).") from e
-    _libs = read_validated_samplesheet(_valid, param("seq_center") or "")
+
+CONTROL_PROTEINS = ("input", "igg")  # protein values that mark a control row (any case)
+PORT_SHEET_COLS = ("condition", "protein", "rep", "type", "fastq1", "fastq2", "scale_factor")
+
+
+def read_port_samplesheet(path, seq_center=""):
+    """Port-format samplesheet -> the library metadata read_validated_samplesheet returns.
+
+    Required columns: condition, protein, rep, fastq1. Optional (may be missing or
+    empty): type (broad | narrow; required for non-control rows), fastq2 (empty =
+    single-end), scale_factor (default 1). Rows sharing condition/protein/rep are
+    runs of one sample (merged). Rows whose protein is input or IgG are controls;
+    a ChIP sample uses the control of its condition with the same rep, else that
+    condition's only control; when only one condition has controls, they are
+    shared by every condition. No control found = MACS3 runs without one.
+    """
+    reader = csv.DictReader(io.StringIO(read_text(path)))
+    header = [(h or "").strip().lower() for h in (reader.fieldnames or [])]
+    unknown = [h for h in header if h and h not in PORT_SHEET_COLS]
+    if unknown:
+        raise ValueError(f"{path}: unknown samplesheet column(s) {unknown}; allowed: {', '.join(PORT_SHEET_COLS)}.")
+    for col in ("condition", "protein", "rep", "fastq1"):
+        if col not in header:
+            raise ValueError(f"{path}: the samplesheet needs a `{col}` column.")
+    name_re, rep_re = re.compile(r"[A-Za-z0-9][\w.-]*"), re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*")
+    samples = OrderedDict()
+    for n, raw in enumerate(reader, start=2):
+        row = {(k or "").strip().lower(): (v or "").strip() for k, v in raw.items() if k is not None}
+        if not any(row.values()):
+            continue
+        where = f"{path} line {n}"
+        cond, prot, rep = row.get("condition", ""), row.get("protein", ""), row.get("rep", "")
+        for key, value, rx in (("condition", cond, name_re), ("protein", prot, name_re), ("rep", rep, rep_re)):
+            if not rx.fullmatch(value):
+                raise ValueError(f"{where}: {key} {value!r} must be non-empty, start with a letter or digit and "
+                                 "contain only letters, digits, '.', '-'" + (" or '_'." if key != "rep" else " (no '_')."))
+        is_ctrl = prot.lower() in CONTROL_PROTEINS
+        typ = "" if is_ctrl else row.get("type", "").lower()
+        if not is_ctrl and typ not in ("broad", "narrow"):
+            raise ValueError(f"{where}: type must be broad or narrow for protein {prot} (got {typ!r}).")
+        sf_txt = row.get("scale_factor", "")
+        try:
+            sf = float(sf_txt) if sf_txt else 1.0
+        except ValueError:
+            raise ValueError(f"{where}: scale_factor {sf_txt!r} is not a number.") from None
+        if not sf > 0:
+            raise ValueError(f"{where}: scale_factor must be > 0 (got {sf_txt}).")
+        fq1, fq2 = row.get("fastq1", ""), row.get("fastq2", "")
+        if not fq1:
+            raise ValueError(f"{where}: fastq1 is empty.")
+        sid = f"{cond}_{prot}_{rep}"
+        meta = samples.setdefault(sid, {"condition": cond, "protein": prot, "rep": rep, "is_control": is_ctrl,
+                                        "type": typ, "scale_factor": sf, "single_end": not fq2, "runs": [],
+                                        "scale_given": bool(sf_txt)})
+        for key, value in (("type", typ), ("scale_factor", sf), ("single_end", not fq2)):
+            if meta[key] != value:
+                raise ValueError(f"{where}: every run of {sid} must have the same {key}.")
+        meta["runs"].append((fq1, fq2))
+    if not samples:
+        raise ValueError(f"{path}: the samplesheet has no samples.")
+    ptype = {}
+    for sid, m in samples.items():
+        if not m["is_control"] and ptype.setdefault(m["protein"], m["type"]) != m["type"]:
+            raise ValueError(f"Protein {m['protein']} is listed as both broad and narrow; use one type per protein.")
+    controls = [s for s, m in samples.items() if m["is_control"]]
+    ctrl_conditions = {samples[c]["condition"] for c in controls}
+
+    def pick_control(m):
+        pool = [c for c in controls if samples[c]["condition"] == m["condition"]]
+        if not pool and len(ctrl_conditions) == 1:
+            pool = controls
+        if not pool:
+            return ""
+        same_rep = [c for c in pool if samples[c]["rep"] == m["rep"]]
+        if len(same_rep) == 1:
+            return same_rep[0]
+        if len(pool) == 1:
+            return pool[0]
+        raise ValueError(f"Cannot choose a control for {m['condition']}_{m['protein']}_{m['rep']} among {pool}: "
+                         "give the controls the same rep values as the ChIP samples.")
+
+    libs = []
+    for sid, m in samples.items():
+        control = "" if m["is_control"] else pick_control(m)
+        for k, (fq1, fq2) in enumerate(m["runs"], start=1):
+            lib = f"{sid}_T{k}"
+            rg = f"@RG\\tID:{lib}\\tSM:{sid}\\tPL:ILLUMINA\\tLB:{lib}\\tPU:1"
+            if seq_center:
+                rg += f"\\tCN:{seq_center}"
+            libs.append({"id": lib, "single_end": m["single_end"], "antibody": "" if m["is_control"] else m["protein"],
+                         "control": control, "read_group": f"'{rg}'", "fastq_1": fq1, "fastq_2": fq2,
+                         "is_control": m["is_control"], "type": m["type"], "scale_factor": m["scale_factor"],
+                         "group": f"{m['condition']}_{m['protein']}", "condition": m["condition"],
+                         "scale_given": m["scale_given"],
+                         "protein": m["protein"], "rep": m["rep"]})
+    return libs
+
+
+if NEW_SHEET:
+    _libs = read_port_samplesheet(config["input"], param("seq_center") or "")
+else:
+    with tempfile.TemporaryDirectory() as _tmp:
+        _raw = os.path.join(_tmp, "samplesheet.csv")
+        with open(_raw, "w") as fh:
+            fh.write(read_text(config["input"]))
+        _valid = os.path.join(_tmp, "samplesheet.valid.csv")
+        try:
+            check_samplesheet.check_samplesheet(_raw, _valid)
+        except SystemExit as e:
+            raise ValueError(f"Samplesheet check failed for {config['input']} (see message above).") from e
+        _libs = read_validated_samplesheet(_valid, param("seq_center") or "")
 
 LIBS = OrderedDict()     # library id (..._T<m>) -> meta
 SAMPLES = OrderedDict()  # merged library id (..._REP<n>) -> meta
 for lib in _libs:
+    raw_fq = (lib["fastq_1"], lib["fastq_2"])
     fq = [stage(lib.pop("fastq_1"))]
     fq2 = lib.pop("fastq_2")
     if not lib["single_end"]:
         fq.append(stage(fq2))
-    LIBS[lib["id"]] = dict(lib, reads=fq)
+    LIBS[lib["id"]] = dict(lib, reads=fq, raw_fastq=raw_fq)
     sid = strip_run(lib["id"])
-    meta = SAMPLES.setdefault(sid, {"single_end": lib["single_end"], "antibody": lib["antibody"],
-                                    "control": lib["control"], "libs": []})
+    meta = SAMPLES.setdefault(sid, {
+        "single_end": lib["single_end"], "antibody": lib["antibody"], "control": lib["control"], "libs": [],
+        # port extension; nf-core sheets: one MACS3 mode for all IPs, factor 1, group = id - _REP<n>
+        "is_control": lib.get("is_control", not lib["antibody"] and not lib["control"]),
+        "type": lib.get("type", "narrow" if NARROW else "broad"),
+        "scale_factor": lib.get("scale_factor", 1.0),
+        "scale_given": lib.get("scale_given", False),
+        "group": lib.get("group", strip_rep(sid)),
+        "condition": lib.get("condition", ""), "protein": lib.get("protein", ""), "rep": lib.get("rep", "")})
     meta["libs"].append(lib["id"])
 
 PE_LIBS = [l for l in LIBS if not LIBS[l]["single_end"]]
@@ -371,15 +533,31 @@ def samples_ok():
 
 
 def ip_samples():
-    """ch_ip_control_bam: IP samples whose control also made it through."""
+    """ch_ip_control_bam: IP samples whose control also made it through.
+
+    Port sheets: every ChIP (non-control) sample; one without a control is kept,
+    one whose control was dropped (min_trimmed_reads) is dropped, as in nf-core.
+    """
     ok = set(samples_ok())
+    if NEW_SHEET:
+        return [s for s in SAMPLES if s in ok and not SAMPLES[s]["is_control"]
+                and (not SAMPLES[s]["control"] or SAMPLES[s]["control"] in ok)]
     return [s for s in SAMPLES if s in ok and SAMPLES[s]["control"] and SAMPLES[s]["control"] in ok]
+
+
+def calls_peaks(s):
+    """Port sheets: MACS3 only for type=narrow (broad marks get tracks and QC only)."""
+    return not NEW_SHEET or SAMPLES[s]["type"] == "narrow"
+
+
+def macs_samples():
+    return [s for s in ip_samples() if calls_peaks(s)]
 
 
 def peak_samples():
     """BAM_PEAKS_CALL_QC_ANNOTATE_MACS3_HOMER: peaks.size() > 0."""
     sizes = _summary(checkpoints.peak_summary)
-    return [s for s in ip_samples() if sizes[s] > 0]
+    return [s for s in macs_samples() if sizes[s] > 0]
 
 
 def antibody_groups():
@@ -389,7 +567,7 @@ def antibody_groups():
         groups.setdefault(SAMPLES[s]["antibody"], []).append(s)
     out = OrderedDict()
     for ab in sorted(groups):
-        counts = Counter(strip_rep(s) for s in groups[ab])
+        counts = Counter(SAMPLES[s]["group"] for s in groups[ab])
         out[ab] = {"peaks": groups[ab], "multiple_groups": len(counts) > 1,
                    "replicates_exist": max(counts.values()) > 1}
     return out
@@ -442,15 +620,15 @@ def raw_fastqc(lib, ext):
 
 
 def lib_bam(lib):
-    return f"{LIB_DIR}/{lib}.Lb.sorted.bam"
+    return f"{LIB_DIR}/{lib}.{LBS}.bam"
 
 
 def mkd_bam(s):
-    return f"{MRG_DIR}/{s}.mLb.mkD.sorted.bam"
+    return f"{MRG_DIR}/{s}.{MKDS}.bam"
 
 
 def clean_bam(s):
-    return f"{ML}/{s}.mLb.clN.sorted.bam"
+    return f"{ML}/{s}.{CLNS}.bam"
 
 
 def stats_files(bam):
@@ -459,7 +637,82 @@ def stats_files(bam):
 
 
 def bigwig(s):
-    return f"{ML}/bigwig/{s}.mLb.clN.bigWig"
+    """Replicate RPM bigWig (port sheets: bigwig/replicate_bws/<id>.final.bw)."""
+    return f"{BW_REP}/{s}.{CLNP}.{BW}"
+
+
+# Port sheets only -------------------------------------------------------------
+def bigwig_scaled(s):
+    """Replicate RPM bigWig x its samplesheet scale_factor."""
+    return f"{BW_REP}/{s}.{CLNP}.scaled.{BW}"
+
+
+def sample_bigwig(g, scaled=False):
+    """<condition>_<protein> bigWig: mean of its replicates (scaled: x mean scale_factor)."""
+    return f"{BW_SMP}/{g}.{CLNP}{'.scaled' if scaled else ''}.{BW}"
+
+
+def bw_groups():
+    """<condition>_<protein> -> replicates that reached a final BAM."""
+    groups = OrderedDict()
+    for s in samples_ok():
+        groups.setdefault(SAMPLES[s]["group"], []).append(s)
+    return groups
+
+
+def heatmap_proteins():
+    """ChIP proteins with at least one final BAM (controls are not plotted)."""
+    ok = samples_ok()
+    return sorted({SAMPLES[s]["protein"] for s in ok if not SAMPLES[s]["is_control"]})
+
+
+def protein_type(protein):
+    return next(m["type"] for m in SAMPLES.values() if m["protein"] == protein and not m["is_control"])
+
+
+HEATMAP_REGIONS = ("tss", "genes", "intergenic", "enhancers_center", "enhancers_scaled")
+
+
+def heatmap_regions(protein):
+    """tss: reference-point on the TSS (narrow only); genes: scale-regions over gene
+    bodies; intergenic: scale-regions over the gaps between genes; enhancers_center /
+    enhancers_scaled: enhancer_bed, reference-point on the centre and scale-regions
+    (both, when enhancer_bed is set)."""
+    regions = (["tss"] if protein_type(protein) == "narrow" else []) + ["genes", "intergenic"]
+    return regions + (["enhancers_center", "enhancers_scaled"] if ENHANCER_BED else [])
+
+
+def protein_bigwigs(protein, kind):
+    """bigWigs of one protein (every condition) for a heatmap kind."""
+    if kind.startswith("replicate"):
+        reps = [s for s in samples_ok() if not SAMPLES[s]["is_control"] and SAMPLES[s]["protein"] == protein]
+        return [bigwig_scaled(s) if kind.endswith("scaled") else bigwig(s) for s in reps]
+    groups = [g for g, reps in bw_groups().items()
+              if not SAMPLES[reps[0]]["is_control"] and SAMPLES[reps[0]]["protein"] == protein]
+    return [sample_bigwig(g, kind.endswith("scaled")) for g in groups]
+
+
+SCALE_PLOT = config.get("scale_factor_barplot") or {}
+SCALE_DIR = f"{O}/scale_factors"
+
+
+def scale_barplot_proteins():
+    """ChIP proteins with at least one scale_factor written in the samplesheet."""
+    if not NEW_SHEET or not SCALE_PLOT.get("enabled", True):
+        return []
+    return sorted({m["protein"] for m in SAMPLES.values() if not m["is_control"] and m["scale_given"]})
+
+
+def scale_barplot_outputs():
+    fmt = SCALE_PLOT.get("format", "pdf")
+    return [f"{SCALE_DIR}/{p}.scale_factors.{x}" for p in scale_barplot_proteins() for x in (f"barplot.{fmt}", "tsv")]
+
+
+def heatmap_outputs():
+    if flag("skip_plot_profile"):
+        return []
+    return [f"{HEATMAP}/{p}/{p}.{k}.{r}.{x}" for p in heatmap_proteins() for k in HEATMAP_KINDS
+            for r in heatmap_regions(p) for x in ("computeMatrix.mat.gz", "plotHeatmap.png", "plotProfile.png")]
 
 
 def peak_file(s):
@@ -475,9 +728,9 @@ CMM_METRICS = ["alignment_summary_metrics", "base_distribution_by_cycle_metrics"
 
 
 def cmm_metrics(s):
-    out = [f"{ML}/picard_metrics/{s}.mLb.clN.sorted.CollectMultipleMetrics.{m}" for m in CMM_METRICS]
+    out = [f"{ML}/picard_metrics/{s}.{CLNS}.CollectMultipleMetrics.{m}" for m in CMM_METRICS]
     if not SAMPLES[s]["single_end"]:
-        out.append(f"{ML}/picard_metrics/{s}.mLb.clN.sorted.CollectMultipleMetrics.insert_size_metrics")
+        out.append(f"{ML}/picard_metrics/{s}.{CLNS}.CollectMultipleMetrics.insert_size_metrics")
     return out
 
 
@@ -486,10 +739,10 @@ def cmm_metrics(s):
 # -----------------------------------------------------------------------------
 def genome_outputs():
     out = [f"{O}/pipeline_info/samplesheet.valid.csv", FAI, SIZES]
-    if not flag("skip_igv"):
+    if not SKIP_IGV:
         out.append(f"{O}/genome/{FASTA_NAME}")
     if SAVE_REF:
-        out += [GTF, GENE_BED, FILTERED_BED, INDEX]
+        out += [GTF, GENE_BED, FILTERED_BED, INDEX] + ([INTERGENIC_BED] if BUILD_INTERGENIC else [])
         out += [f"{GENOME_DIR}/{n}" for n in GUNZIP_SRC]
     if ALIGNER == "chromap" and not param("chromap_index"):
         out.append(INDEX)
@@ -518,23 +771,25 @@ def aligned_library_outputs(lib):
 
 def sample_outputs(s):
     pe = not SAMPLES[s]["single_end"]
-    out = [f"{ML}/picard_metrics/{s}.mLb.mkD.sorted.MarkDuplicates.metrics.txt"]
+    out = [f"{ML}/picard_metrics/{s}.{MKDS}.MarkDuplicates.metrics.txt"]
     out += [clean_bam(s), f"{clean_bam(s)}.bai"] + stats_files(clean_bam(s))
     if SAVE_ALIGN:
-        out += [f"{MRG_DIR}/{s}.mLb.sorted.bam", mkd_bam(s), f"{mkd_bam(s)}.bai"] + stats_files(mkd_bam(s))
+        out += [f"{MRG_DIR}/{s}.{MRG}.bam", mkd_bam(s), f"{mkd_bam(s)}.bai"] + stats_files(mkd_bam(s))
         if pe:
-            out += [f"{MRG_DIR}/{s}.mLb.flT.sorted.bam", f"{MRG_DIR}/{s}.mLb.flT.name_sorted.bam",
-                    f"{MRG_DIR}/{s}.mLb.clN.bam"]
+            out += [f"{MRG_DIR}/{s}.{FLTS}.bam", f"{MRG_DIR}/{s}.{FLTN}.bam",
+                    f"{MRG_DIR}/{s}.{CLNR}.bam"]
     if not flag("skip_preseq"):
-        out += [f"{ML}/preseq/{s}.mLb.mkD.lc_extrap.txt", f"{ML}/preseq/{s}.mLb.mkD.command.log"]
+        out += [f"{ML}/preseq/{s}.{MKDP}.lc_extrap.txt", f"{ML}/preseq/{s}.{MKDP}.command.log"]
     if not flag("skip_picard_metrics"):
         out += cmm_metrics(s)
     if not flag("skip_spp"):
         out += [f"{ML}/phantompeakqualtools/{s}.spp.{x}" for x in ("out", "pdf")]
         out += [f"{ML}/phantompeakqualtools/{s}.spp_{x}_mqc.tsv" for x in ("nsc", "rsc", "correlation")]
-    out += [bigwig(s), f"{ML}/bigwig/scale/{s}.mLB.clN.scale_factor.txt"]
-    if not flag("skip_plot_profile"):
-        p = f"{ML}/deepTools/plotProfile/{s}.mLb.clN"
+    out += [bigwig(s), f"{ML}/bigwig/scale/{s}.{COV}.scale_factor.txt"]
+    if NEW_SHEET:
+        out.append(bigwig_scaled(s))
+    if not flag("skip_plot_profile") and not NEW_SHEET:
+        p = f"{ML}/deepTools/plotProfile/{s}.{CLNP}"
         out += [f"{p}.computeMatrix.mat.gz", f"{p}.computeMatrix.vals.mat.tab", f"{p}.plotProfile.pdf",
                 f"{p}.plotProfile.tab", f"{p}.plotHeatmap.pdf", f"{p}.plotHeatmap.mat.tab"]
     return out
@@ -543,9 +798,10 @@ def sample_outputs(s):
 def ip_outputs(s):
     out = []
     if not flag("skip_plot_fingerprint"):
-        p = f"{ML}/deepTools/plotFingerprint/{s}.mLb.clN.plotFingerprint"
+        p = f"{ML}/deepTools/plotFingerprint/{s}.{CLNP}.plotFingerprint"
         out += [f"{p}.pdf", f"{p}.raw.txt", f"{p}.qcmetrics.txt"]
-    out += list(macs3_outputs(s).values())
+    if calls_peaks(s):
+        out += list(macs3_outputs(s).values())
     return out
 
 
@@ -576,6 +832,11 @@ def all_outputs(wc):
         out += aligned_library_outputs(lib)
     for s in samples_ok():
         out += sample_outputs(s)
+    if NEW_SHEET:
+        for g in bw_groups():
+            out += [sample_bigwig(g), sample_bigwig(g, scaled=True)]
+        out += heatmap_outputs()
+        out += scale_barplot_outputs()
     for s in ip_samples():
         out += ip_outputs(s)
     peaks = peak_samples()
@@ -586,10 +847,10 @@ def all_outputs(wc):
         out += [f"{MACS}/qc/macs3_annotatePeaks.{x}" for x in ("summary.txt", "plots.pdf", "summary_mqc.tsv")]
     for ab in consensus_antibodies():
         out += consensus_outputs(ab)
-    if not flag("skip_igv"):
+    if not SKIP_IGV:
         out += [f"{O}/igv/{PEAK_TYPE}/igv_session.xml", f"{O}/igv/{PEAK_TYPE}/igv_files.txt"]
     if not flag("skip_multiqc"):
-        out.append(f"{O}/multiqc/{PEAK_TYPE}/multiqc_report.html")
+        out.append(f"{MQC_DIR}/multiqc_report.html")
     return out
 
 
@@ -626,19 +887,47 @@ rule fetch_remote:
             shutil.copyfileobj(src, dst)
 
 
-# SAMPLESHEET_CHECK (bin/check_samplesheet.py)
-rule samplesheet_check:
-    input:
-        INPUT,
-    output:
-        f"{O}/pipeline_info/samplesheet.valid.csv",
-    container:
-        container_path("python")
-    threads: res("process_single")["threads"]
-    resources:
-        mem_mb=res("process_single")["mem_mb"],
-    shell:
-        "python3 {SCRIPTS}/check_samplesheet.py {input} {output}"
+if not NEW_SHEET:
+
+    # SAMPLESHEET_CHECK (bin/check_samplesheet.py)
+    rule samplesheet_check:
+        input:
+            INPUT,
+        output:
+            f"{O}/pipeline_info/samplesheet.valid.csv",
+        container:
+            container_path("python")
+        threads: res("process_single")["threads"]
+        resources:
+            mem_mb=res("process_single")["mem_mb"],
+        shell:
+            "python3 {SCRIPTS}/check_samplesheet.py {input} {output}"
+
+else:
+
+    # Port sheets: the parsed design (one row per run), with the sample IDs,
+    # the control each ChIP sample uses and whether peaks are called.
+    rule samplesheet_check:
+        input:
+            INPUT,
+        output:
+            f"{O}/pipeline_info/samplesheet.valid.csv",
+        run:
+            cols = ["sample", "run", "condition", "protein", "rep", "type", "control", "peak_calling",
+                    "scale_factor", "single_end", "fastq_1", "fastq_2"]
+            with open(output[0], "w", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=cols, lineterminator="\n")
+                writer.writeheader()
+                for lib, m in LIBS.items():
+                    s = strip_run(lib)
+                    meta = SAMPLES[s]
+                    writer.writerow({
+                        "sample": s, "run": lib, "condition": meta["condition"], "protein": meta["protein"],
+                        "rep": meta["rep"], "type": "control" if meta["is_control"] else meta["type"],
+                        "control": meta["control"],
+                        "peak_calling": "no" if meta["is_control"] or not calls_peaks(s) else "yes",
+                        "scale_factor": meta["scale_factor"], "single_end": int(meta["single_end"]),
+                        "fastq_1": m["raw_fastq"][0], "fastq_2": m["raw_fastq"][1]})
 
 
 # =============================================================================
@@ -1093,8 +1382,8 @@ def unmapped_reads(lib):
     d = os.path.abspath(f"{AL}/library/unmapped")
     if ALIGNER == "bowtie2":
         if LIBS[lib]["single_end"]:
-            return [f"{d}/{lib}.Lb.unmapped.fastq.gz"]
-        return [f"{d}/{lib}.Lb.unmapped_1.fastq.gz", f"{d}/{lib}.Lb.unmapped_2.fastq.gz"]
+            return [f"{d}/{lib}.{LB}.unmapped.fastq.gz"]
+        return [f"{d}/{lib}.{LB}.unmapped_1.fastq.gz", f"{d}/{lib}.{LB}.unmapped_2.fastq.gz"]
     if LIBS[lib]["single_end"]:
         return [f"{d}/{lib}.unmapped_1.fastq.gz"]
     return [f"{d}/{lib}.unmapped_1.fastq.gz", f"{d}/{lib}.unmapped_2.fastq.gz"]
@@ -1115,7 +1404,7 @@ rule bwa_mem:
         reads=lambda wc: trimmed_reads(wc.lib),
         index=INDEX,
     output:
-        f"{W}/bwa/library/{{lib}}.Lb.bam",
+        f"{W}/bwa/library/{{lib}}.{LBR}.bam",
     params:
         args=lambda wc: bwa_mem_args(wc.lib),
         args2=args("bwa_mem_samtools"),
@@ -1135,8 +1424,8 @@ rule bwa_mem:
         ln -s $(realpath {input.index}) {params.index}
         INDEX=`find -L ./{params.index} -name "*.amb" | sed 's/\\.amb$//'`
         bwa mem {params.args} -t {threads} $INDEX {params.reads} \
-            | samtools view {params.args2} --threads {threads} -o {wildcards.lib}.Lb.bam -
-        mv {wildcards.lib}.Lb.bam {output}
+            | samtools view {params.args2} --threads {threads} -o {wildcards.lib}.{LBR}.bam -
+        mv {wildcards.lib}.{LBR}.bam {output}
         """
 
 
@@ -1154,8 +1443,8 @@ rule bowtie2_align:
         reads=lambda wc: trimmed_reads(wc.lib),
         index=INDEX,
     output:
-        bam=f"{W}/bowtie2/library/{{lib}}.Lb.bam",
-        log=f"{W}/bowtie2/library/{{lib}}.Lb.bowtie2.log",
+        bam=f"{W}/bowtie2/library/{{lib}}.{LBR}.bam",
+        log=f"{W}/bowtie2/library/{{lib}}.{LB}.bowtie2.log",
     params:
         args=lambda wc: bowtie2_args(wc.lib),
         index=os.path.basename(INDEX),
@@ -1163,8 +1452,8 @@ rule bowtie2_align:
         reads=lambda wc: (f"-U {read_links(wc.lib)[0]}" if LIBS[wc.lib]["single_end"]
                           else f"-1 {read_links(wc.lib)[0]} -2 {read_links(wc.lib)[1]}"),
         unaligned=lambda wc: "" if not SAVE_UNALIGNED else (
-            f"--un-gz {wc.lib}.Lb.unmapped.fastq.gz" if LIBS[wc.lib]["single_end"]
-            else f"--un-conc-gz {wc.lib}.Lb.unmapped.fastq.gz"),
+            f"--un-gz {wc.lib}.{LB}.unmapped.fastq.gz" if LIBS[wc.lib]["single_end"]
+            else f"--un-conc-gz {wc.lib}.{LB}.unmapped.fastq.gz"),
         unmapped=lambda wc: " ".join(unmapped_reads(wc.lib)) if SAVE_UNALIGNED else "",
     container:
         container_path("bowtie2_align")
@@ -1181,17 +1470,17 @@ rule bowtie2_align:
         [ -z "$INDEX" ] && INDEX=`find -L ./{params.index} -name "*.rev.1.bt2l" | sed "s/\\.rev.1.bt2l$//"`
         [ -z "$INDEX" ] && echo "Bowtie2 index files not found" 1>&2 && exit 1
         bowtie2 -x $INDEX {params.reads} --threads {threads} {params.unaligned} {params.args} \
-            2> {wildcards.lib}.Lb.bowtie2.log \
-            | samtools view --threads {threads} -o {wildcards.lib}.Lb.bam -
-        cat {wildcards.lib}.Lb.bowtie2.log >&2
-        if [ -f {wildcards.lib}.Lb.unmapped.fastq.1.gz ]; then
-            mv {wildcards.lib}.Lb.unmapped.fastq.1.gz {wildcards.lib}.Lb.unmapped_1.fastq.gz
+            2> {wildcards.lib}.{LB}.bowtie2.log \
+            | samtools view --threads {threads} -o {wildcards.lib}.{LBR}.bam -
+        cat {wildcards.lib}.{LB}.bowtie2.log >&2
+        if [ -f {wildcards.lib}.{LB}.unmapped.fastq.1.gz ]; then
+            mv {wildcards.lib}.{LB}.unmapped.fastq.1.gz {wildcards.lib}.{LB}.unmapped_1.fastq.gz
         fi
-        if [ -f {wildcards.lib}.Lb.unmapped.fastq.2.gz ]; then
-            mv {wildcards.lib}.Lb.unmapped.fastq.2.gz {wildcards.lib}.Lb.unmapped_2.fastq.gz
+        if [ -f {wildcards.lib}.{LB}.unmapped.fastq.2.gz ]; then
+            mv {wildcards.lib}.{LB}.unmapped.fastq.2.gz {wildcards.lib}.{LB}.unmapped_2.fastq.gz
         fi
-        mv {wildcards.lib}.Lb.bam {output.bam}
-        mv {wildcards.lib}.Lb.bowtie2.log {output.log}
+        mv {wildcards.lib}.{LBR}.bam {output.bam}
+        mv {wildcards.lib}.{LB}.bowtie2.log {output.log}
         for f in {params.unmapped}; do mkdir -p $(dirname $f); mv $(basename $f) $f; done
         """
 
@@ -1203,7 +1492,7 @@ rule chromap:
         index=INDEX,
         fasta=FASTA,
     output:
-        f"{W}/chromap/library/{{lib}}.Lb.bam",
+        f"{W}/chromap/library/{{lib}}.{LBR}.bam",
     params:
         args=args("chromap"),
         args3=lambda wc: f"-r {LIBS[wc.lib]['read_group']}",
@@ -1229,7 +1518,7 @@ rule chromap:
             idx={params.index}
         fi
         ln -s $(realpath {input.fasta}) {FASTA_NAME}
-        p={wildcards.lib}.Lb
+        p={wildcards.lib}.{LBR}
         chromap {params.args} -t {threads} -x $idx -r {FASTA_NAME} {params.reads} -o $p.sam
         samtools addreplacerg {params.args3} -o $p.rg.sam $p.sam
         samtools view -@ {threads} -bh -o $p.bam $p.rg.sam
@@ -1288,7 +1577,7 @@ rule star_align:
 def aligner_bam(wc):
     if ALIGNER == "star":
         return f"{W}/star/library/{wc.lib}.Aligned.out.bam"
-    return f"{W}/{ALIGNER}/library/{wc.lib}.Lb.bam"
+    return f"{W}/{ALIGNER}/library/{wc.lib}.{LBR}.bam"
 
 
 # =============================================================================
@@ -1301,7 +1590,7 @@ rule samtools_sort_library:
         bam=aligner_bam,
         fasta=FASTA,
     output:
-        f"{LIB_DIR}/{{lib}}.Lb.sorted.bam",
+        f"{LIB_DIR}/{{lib}}.{LBS}.bam",
     container:
         container_path("samtools")
     threads: res("process_medium")["threads"]
@@ -1313,7 +1602,7 @@ rule samtools_sort_library:
         """
         ln -s $(realpath {input.bam}) $(basename {input.bam})
         ln -s $(realpath {input.fasta}) {FASTA_NAME}
-        p={wildcards.lib}.Lb.sorted
+        p={wildcards.lib}.{LBS}
         samtools cat --threads {threads} $(basename {input.bam}) \
             | samtools sort -T $p --threads {threads} --reference {FASTA_NAME} -o $p.bam -
         mv $p.bam {output}
@@ -1321,7 +1610,8 @@ rule samtools_sort_library:
 
 
 BAM_DIRS = sorted({LIB_DIR, MRG_DIR, ML})
-STAT_BAM = r"[^/]+\.(?:Lb\.sorted|mLb\.mkD\.sorted|mLb\.clN\.sorted)\.bam"
+STAT_BAM = (r"[^/]+\.(?:" + "|".join(re.escape(x) for x in (LBS, MKDS, CLNS))
+            + r")\.bam")
 
 
 # SAMTOOLS_INDEX (library, markduplicates and filtered BAMs)
@@ -1417,7 +1707,7 @@ rule picard_mergesamfiles:
     input:
         lambda wc: sorted((lib_bam(l) for l in sample_libs(wc.sample)), key=os.path.basename),
     output:
-        f"{MRG_DIR}/{{sample}}.mLb.sorted.bam",
+        f"{MRG_DIR}/{{sample}}.{MRG}.bam",
     params:
         args=args("picard_mergesamfiles"),
         mem=lambda wc, resources: picard_mem(resources),
@@ -1436,8 +1726,8 @@ rule picard_mergesamfiles:
         if [ $# -gt 1 ]; then
             inputs=
             for f in {input}; do ln -s $(realpath $f) $(basename $f); inputs="$inputs --INPUT $(basename $f)"; done
-            picard -Xmx{params.mem}M MergeSamFiles {params.args} $inputs --OUTPUT {wildcards.sample}.mLb.sorted.bam
-            mv {wildcards.sample}.mLb.sorted.bam {output}
+            picard -Xmx{params.mem}M MergeSamFiles {params.args} $inputs --OUTPUT {wildcards.sample}.{MRG}.bam
+            mv {wildcards.sample}.{MRG}.bam {output}
         else
             {params.single} $(realpath {input}) {output}
         fi
@@ -1447,12 +1737,12 @@ rule picard_mergesamfiles:
 # BAM_MARKDUPLICATES_PICARD:PICARD_MARKDUPLICATES
 rule picard_markduplicates:
     input:
-        bam=f"{MRG_DIR}/{{sample}}.mLb.sorted.bam",
+        bam=f"{MRG_DIR}/{{sample}}.{MRG}.bam",
         fasta=FASTA,
         fai=FAI,
     output:
-        bam=f"{MRG_DIR}/{{sample}}.mLb.mkD.sorted.bam",
-        metrics=f"{ML}/picard_metrics/{{sample}}.mLb.mkD.sorted.MarkDuplicates.metrics.txt",
+        bam=f"{MRG_DIR}/{{sample}}.{MKDS}.bam",
+        metrics=f"{ML}/picard_metrics/{{sample}}.{MKDS}.MarkDuplicates.metrics.txt",
     params:
         args=args("picard_markduplicates"),
         mem=lambda wc, resources: picard_mem(resources),
@@ -1465,12 +1755,12 @@ rule picard_markduplicates:
         "minimal"
     shell:
         """
-        ln -s $(realpath {input.bam}) {wildcards.sample}.mLb.sorted.bam
+        ln -s $(realpath {input.bam}) {wildcards.sample}.{MRG}.bam
         ln -s $(realpath {input.fasta}) {FASTA_NAME}
         ln -s $(realpath {input.fai}) {FASTA_NAME}.fai
-        p={wildcards.sample}.mLb.mkD.sorted
+        p={wildcards.sample}.{MKDS}
         picard -Xmx{params.mem}M MarkDuplicates {params.args} \
-            --INPUT {wildcards.sample}.mLb.sorted.bam --OUTPUT $p.bam \
+            --INPUT {wildcards.sample}.{MRG}.bam --OUTPUT $p.bam \
             --REFERENCE_SEQUENCE {FASTA_NAME} --METRICS_FILE $p.MarkDuplicates.metrics.txt
         mv $p.bam {output.bam}
         mv $p.MarkDuplicates.metrics.txt {output.metrics}
@@ -1515,10 +1805,10 @@ rule bamtools_filter_pe:
     input:
         unpack(lambda wc: bamtools_inputs(wc.pe_sample)),
     output:
-        f"{MRG_DIR}/{{pe_sample}}.mLb.flT.sorted.bam",
+        f"{MRG_DIR}/{{pe_sample}}.{FLTS}.bam",
     params:
         args=lambda wc: bamtools_args(wc.pe_sample),
-        prefix=lambda wc: f"{wc.pe_sample}.mLb.flT.sorted",
+        prefix=lambda wc: f"{wc.pe_sample}.{FLTS}",
     container:
         container_path("bamtools")
     threads: res("process_medium")["threads"]
@@ -1535,10 +1825,10 @@ rule bamtools_filter_se:
     input:
         unpack(lambda wc: bamtools_inputs(wc.se_sample)),
     output:
-        f"{ML}/{{se_sample}}.mLb.clN.sorted.bam",
+        f"{ML}/{{se_sample}}.{CLNS}.bam",
     params:
         args=lambda wc: bamtools_args(wc.se_sample),
-        prefix=lambda wc: f"{wc.se_sample}.mLb.clN.sorted",
+        prefix=lambda wc: f"{wc.se_sample}.{CLNS}",
     container:
         container_path("bamtools")
     threads: res("process_medium")["threads"]
@@ -1553,10 +1843,10 @@ rule bamtools_filter_se:
 # BAM_FILTER_BAMTOOLS:SAMTOOLS_SORT (-n, prefix <id>.mLb.flT.name_sorted)
 rule samtools_sort_name:
     input:
-        bam=f"{MRG_DIR}/{{pe_sample}}.mLb.flT.sorted.bam",
+        bam=f"{MRG_DIR}/{{pe_sample}}.{FLTS}.bam",
         fasta=FASTA,
     output:
-        f"{MRG_DIR}/{{pe_sample}}.mLb.flT.name_sorted.bam",
+        f"{MRG_DIR}/{{pe_sample}}.{FLTN}.bam",
     params:
         args=args("filter_name_sort"),
     container:
@@ -1570,7 +1860,7 @@ rule samtools_sort_name:
         """
         ln -s $(realpath {input.bam}) $(basename {input.bam})
         ln -s $(realpath {input.fasta}) {FASTA_NAME}
-        p={wildcards.pe_sample}.mLb.flT.name_sorted
+        p={wildcards.pe_sample}.{FLTN}
         samtools cat --threads {threads} $(basename {input.bam}) \
             | samtools sort {params.args} -T $p --threads {threads} --reference {FASTA_NAME} -o $p.bam -
         mv $p.bam {output}
@@ -1580,9 +1870,9 @@ rule samtools_sort_name:
 # BAM_REMOVE_ORPHANS (bin/bampe_rm_orphan.py)
 rule bam_remove_orphans:
     input:
-        f"{MRG_DIR}/{{pe_sample}}.mLb.flT.name_sorted.bam",
+        f"{MRG_DIR}/{{pe_sample}}.{FLTN}.bam",
     output:
-        f"{MRG_DIR}/{{pe_sample}}.mLb.clN.bam",
+        f"{MRG_DIR}/{{pe_sample}}.{CLNR}.bam",
     params:
         args=args("bam_remove_orphans"),
     container:
@@ -1595,7 +1885,7 @@ rule bam_remove_orphans:
     shell:
         """
         ln -s $(realpath {input}) $(basename {input})
-        p={wildcards.pe_sample}.mLb.clN
+        p={wildcards.pe_sample}.{CLNR}
         samtools sort -n -@ {threads} -o $p.name.sorted.bam -T $p.name.sorted $(basename {input})
         python3 {SCRIPTS}/bampe_rm_orphan.py $p.name.sorted.bam $p.bam {params.args}
         mv $p.bam {output}
@@ -1605,10 +1895,10 @@ rule bam_remove_orphans:
 # BAM_FILTER_BAMTOOLS:BAM_SORT_STATS_SAMTOOLS:SAMTOOLS_SORT (prefix <id>.mLb.clN.sorted)
 rule samtools_sort_clean:
     input:
-        bam=f"{MRG_DIR}/{{pe_sample}}.mLb.clN.bam",
+        bam=f"{MRG_DIR}/{{pe_sample}}.{CLNR}.bam",
         fasta=FASTA,
     output:
-        f"{ML}/{{pe_sample}}.mLb.clN.sorted.bam",
+        f"{ML}/{{pe_sample}}.{CLNS}.bam",
     container:
         container_path("samtools")
     threads: res("process_medium")["threads"]
@@ -1620,7 +1910,7 @@ rule samtools_sort_clean:
         """
         ln -s $(realpath {input.bam}) $(basename {input.bam})
         ln -s $(realpath {input.fasta}) {FASTA_NAME}
-        p={wildcards.pe_sample}.mLb.clN.sorted
+        p={wildcards.pe_sample}.{CLNS}
         samtools cat --threads {threads} $(basename {input.bam}) \
             | samtools sort -T $p --threads {threads} --reference {FASTA_NAME} -o $p.bam -
         mv $p.bam {output}
@@ -1636,8 +1926,8 @@ rule preseq_lcextrap:
     input:
         mkd_bam("{sample}"),
     output:
-        txt=f"{ML}/preseq/{{sample}}.mLb.mkD.lc_extrap.txt",
-        log=f"{ML}/preseq/{{sample}}.mLb.mkD.command.log",
+        txt=f"{ML}/preseq/{{sample}}.{MKDP}.lc_extrap.txt",
+        log=f"{ML}/preseq/{{sample}}.{MKDP}.command.log",
     params:
         args=args("preseq"),
         pe=lambda wc: "" if SAMPLES[wc.sample]["single_end"] else "-pe",
@@ -1651,7 +1941,7 @@ rule preseq_lcextrap:
     shell:
         """
         ln -s $(realpath {input}) $(basename {input})
-        p={wildcards.sample}.mLb.mkD
+        p={wildcards.sample}.{MKDP}
         preseq lc_extrap {params.args} {params.pe} -output $p.lc_extrap.txt $(basename {input}) \
             2> $p.command.log || {{ cat $p.command.log >&2; exit 1; }}
         mv $p.lc_extrap.txt {output.txt}
@@ -1663,7 +1953,7 @@ def cmm_inputs(s):
     return {"bam": clean_bam(s), "bai": f"{clean_bam(s)}.bai", "fasta": FASTA, "fai": FAI}
 
 
-CMM = f"{ML}/picard_metrics/{{s}}.mLb.clN.sorted.CollectMultipleMetrics"
+CMM = f"{ML}/picard_metrics/{{s}}.{CLNS}.CollectMultipleMetrics"
 # PDFs are untracked extras (which plots Picard draws depends on the data).
 CMM_CMD = """
         ln -s $(realpath {input.bam}) $(basename {input.bam})
@@ -1794,8 +2084,8 @@ rule bedtools_genomecov:
         bam=clean_bam("{sample}"),
         flagstat=stats_files(clean_bam("{sample}"))[1],
     output:
-        bedgraph=f"{W}/bigwig/{{sample}}.mLB.clN.bedGraph",
-        scale=f"{ML}/bigwig/scale/{{sample}}.mLB.clN.scale_factor.txt",
+        bedgraph=f"{W}/bigwig/{{sample}}.{COV}.bedGraph",
+        scale=f"{ML}/bigwig/scale/{{sample}}.{COV}.scale_factor.txt",
     params:
         pe=lambda wc: "" if SAMPLES[wc.sample]["single_end"] else "-pc",
         args=lambda wc: (f"-fs {config['fragment_size']}"
@@ -1810,7 +2100,7 @@ rule bedtools_genomecov:
     shell:
         """
         ln -s $(realpath {input.bam}) $(basename {input.bam})
-        p={wildcards.sample}.mLB.clN
+        p={wildcards.sample}.{COV}
         SCALE_FACTOR=$(grep '[0-9] mapped (' {input.flagstat} | awk '{{print 1000000/$1}}')
         echo $SCALE_FACTOR > $p.scale_factor.txt
         bedtools genomecov -ibam $(basename {input.bam}) -bg -scale $SCALE_FACTOR {params.pe} {params.args} \
@@ -1823,7 +2113,7 @@ rule bedtools_genomecov:
 # UCSC_BEDGRAPHTOBIGWIG
 rule ucsc_bedgraphtobigwig:
     input:
-        bedgraph=f"{W}/bigwig/{{sample}}.mLB.clN.bedGraph",
+        bedgraph=f"{W}/bigwig/{{sample}}.{COV}.bedGraph",
         sizes=SIZES,
     output:
         bigwig("{sample}"),
@@ -1836,13 +2126,248 @@ rule ucsc_bedgraphtobigwig:
         "bedGraphToBigWig {input.bedgraph} {input.sizes} {output}"
 
 
+if BUILD_INTERGENIC:
+
+    # Port sheets without `intergenic_bed`: intergenic regions = bedtools complement
+    # of the gene BED (from the GTF) over the genome. Genes on contigs missing from
+    # the FASTA are dropped first; only chrom/start/end are kept (unstranded).
+    rule intergenic_bed:
+        input:
+            genes=GENE_BED,
+            sizes=SIZES,
+        output:
+            INTERGENIC_BED,
+        container:
+            container_path("bedtools")
+        threads: res("process_default")["threads"]
+        resources:
+            mem_mb=res("process_default")["mem_mb"],
+        shell:
+            """
+            awk 'NR == FNR {{keep[$1]; next}} ($1 in keep)' {input.sizes} {input.genes} | cut -f1-3 \
+                | sortBed -i stdin -g {input.sizes} | complementBed -i stdin -g {input.sizes} > {output}
+            """
+
+
+if NEW_SHEET:
+
+    # Port sheets: replicate RPM bedGraph x the samplesheet scale_factor.
+    rule scale_bedgraph:
+        input:
+            f"{W}/bigwig/{{sample}}.{COV}.bedGraph",
+        output:
+            f"{W}/bigwig/{{sample}}.{COV}.scaled.bedGraph",
+        params:
+            factor=lambda wc: repr(SAMPLES[wc.sample]["scale_factor"]),
+        container:
+            container_path("bedtools")
+        threads: res("process_single")["threads"]
+        resources:
+            mem_mb=res("process_single")["mem_mb"],
+        shell:
+            "awk -v sf={params.factor} 'BEGIN {{OFS=\"\\t\"}} {{$4 = $4 * sf; print}}' {input} > {output}"
+
+    rule ucsc_bedgraphtobigwig_scaled:
+        input:
+            bedgraph=f"{W}/bigwig/{{sample}}.{COV}.scaled.bedGraph",
+            sizes=SIZES,
+        output:
+            bigwig_scaled("{sample}"),
+        container:
+            container_path("bedgraphtobigwig")
+        threads: res("process_single")["threads"]
+        resources:
+            mem_mb=res("process_single")["mem_mb"],
+        shell:
+            "bedGraphToBigWig {input.bedgraph} {input.sizes} {output}"
+
+    # Sample (<condition>_<protein>) bigWig: mean of the replicate RPM bigWigs.
+    # Two replicates: bigwigCompare --operation mean; three or more: bigwigAverage
+    # (the same mean for any number of files); one: a copy.
+    rule bigwig_merge:
+        input:
+            lambda wc: [bigwig(s) for s in bw_groups()[wc.group]],
+        output:
+            sample_bigwig("{group}"),
+        wildcard_constraints:
+            group=alternation(sorted({m["group"] for m in SAMPLES.values()})),
+        params:
+            bs=config["bigwig_merge_binsize"],
+        container:
+            container_path("deeptools")
+        threads: res("bigwig_merge")["threads"]
+        resources:
+            mem_mb=res("bigwig_merge")["mem_mb"],
+        shell:
+            """
+            set -- {input}
+            if [ $# -eq 1 ]; then
+                cp $1 {output}
+            elif [ $# -eq 2 ]; then
+                bigwigCompare -b1 $1 -b2 $2 --operation mean -p {threads} -bs {params.bs} -o {output}
+            else
+                bigwigAverage -b {input} -p {threads} -bs {params.bs} -o {output}
+            fi
+            """
+
+    # Scaled sample bigWig: the merged RPM bigWig x the mean scale_factor of its replicates
+    # (bigwigAverage of a single file with --scaleFactors = that file x the factor).
+    rule bigwig_merge_scaled:
+        input:
+            sample_bigwig("{group}"),
+        output:
+            sample_bigwig("{group}", scaled=True),
+        wildcard_constraints:
+            group=alternation(sorted({m["group"] for m in SAMPLES.values()})),
+        params:
+            factor=lambda wc: repr(sum(SAMPLES[s]["scale_factor"] for s in bw_groups()[wc.group])
+                                   / len(bw_groups()[wc.group])),
+            bs=config["bigwig_merge_binsize"],
+        container:
+            container_path("deeptools")
+        threads: res("bigwig_merge")["threads"]
+        resources:
+            mem_mb=res("bigwig_merge")["mem_mb"],
+        shell:
+            """
+            bigwigAverage -b {input} --scaleFactors {params.factor} -p {threads} -bs {params.bs} -o {output}
+            """
+
+    # Per-protein heatmaps: every condition's bigWigs of one protein in one plot,
+    # for the four bigWig kinds and each region set. tss = reference-point on the
+    # TSS (narrow proteins only); genes = scale-regions over gene bodies (the gene
+    # BED is stranded, so minus-strand genes are flipped and the TSS is on the
+    # left); intergenic = scale-regions over the complement of the gene BED;
+    # enhancers_center / enhancers_scaled = enhancer_bed with reference-point
+    # on the centre and with scale-regions. Each matrix gives a plotHeatmap and a
+    # plotProfile. The blacklist, when set, is excluded (-bl).
+    def computematrix_mode(region):
+        if region == "tss":
+            return "reference-point", config["computematrix_reference_point_args"]
+        if region == "enhancers_center":
+            return "reference-point", config["computematrix_enhancer_reference_point_args"]
+        return "scale-regions", config["computematrix_scale_regions_args"]
+
+    def heatmap_label(path):
+        return os.path.basename(path).replace(f".{CLNP}.scaled.{BW}", "").replace(f".{CLNP}.{BW}", "")
+
+    rule deeptools_computematrix_protein:
+        input:
+            bigwigs=lambda wc: protein_bigwigs(wc.protein, wc.kind),
+            bed=lambda wc: (ENHANCER_BED if wc.region.startswith("enhancers")
+                            else INTERGENIC_BED if wc.region == "intergenic" else GENE_BED),
+            blacklist=BLACKLIST or [],
+        output:
+            f"{HEATMAP}/{{protein}}/{{protein}}.{{kind}}.{{region}}.computeMatrix.mat.gz",
+        wildcard_constraints:
+            protein=alternation(sorted({m["protein"] for m in SAMPLES.values() if not m["is_control"]})),
+            kind=alternation(HEATMAP_KINDS),
+            region=alternation(HEATMAP_REGIONS),
+        params:
+            mode=lambda wc: computematrix_mode(wc.region)[0],
+            args=lambda wc: computematrix_mode(wc.region)[1],
+            labels=lambda wc: " ".join(heatmap_label(b) for b in protein_bigwigs(wc.protein, wc.kind)),
+            blacklist=lambda wc, input: f"-bl {input.blacklist}" if input.blacklist else "",
+            processors=config["computematrix_processors"],
+        container:
+            container_path("deeptools")
+        threads: res("process_high")["threads"]
+        resources:
+            mem_mb=res("process_high")["mem_mb"],
+        shell:
+            """
+            computeMatrix {params.mode} -R {input.bed} -S {input.bigwigs} --samplesLabel {params.labels} \
+                {params.args} {params.blacklist} -p '{params.processors}' -o {output}
+            """
+
+    rule deeptools_plotheatmap_protein:
+        input:
+            f"{HEATMAP}/{{protein}}/{{protein}}.{{kind}}.{{region}}.computeMatrix.mat.gz",
+        output:
+            f"{HEATMAP}/{{protein}}/{{protein}}.{{kind}}.{{region}}.plotHeatmap.png",
+        wildcard_constraints:
+            protein=alternation(sorted({m["protein"] for m in SAMPLES.values() if not m["is_control"]})),
+            kind=alternation(HEATMAP_KINDS),
+            region=alternation(HEATMAP_REGIONS),
+        params:
+            args=config["plotheatmap_args"],
+        container:
+            container_path("deeptools")
+        threads: res("process_low")["threads"]
+        resources:
+            mem_mb=res("process_low")["mem_mb"],
+        shell:
+            "plotHeatmap -m {input} -o {output} {params.args}"
+
+    # Port sheets: bar plot of the samplesheet scale factors of one protein: one
+    # bar per condition (mean of its replicates), SD/SEM error bar, replicate dots.
+    # Title, axis labels, condition order, colours and format: scale_factor_barplot.
+    def scale_barplot_args(protein):
+        cfg_ = SCALE_PLOT
+        vals = [f"--value {m['condition']}:{m['rep']}:{m['scale_factor']!r}"
+                for m in SAMPLES.values() if m["protein"] == protein and not m["is_control"]]
+        colors = cfg_.get("colors") or []
+        if isinstance(colors, dict):
+            col = " ".join(f"--color {shlex.quote(f'{k}={v}')}" for k, v in colors.items())
+        else:
+            col = f"--palette {shlex.quote(','.join(map(str, colors)))}" if colors else ""
+        order = ",".join(map(str, cfg_.get("order") or []))
+        return " ".join(filter(None, [
+            " ".join(vals), col, f"--order {shlex.quote(order)}" if order else "",
+            f"--title {shlex.quote(str(cfg_.get('title', '{protein}')))}",
+            f"--xlabel {shlex.quote(str(cfg_.get('xlabel', '')))}",
+            f"--ylabel {shlex.quote(str(cfg_.get('ylabel', 'Scale factor')))}",
+            f"--error {cfg_.get('error', 'sd')}"]))
+
+    rule scale_factor_barplot:
+        output:
+            plot=f"{SCALE_DIR}/{{protein}}.scale_factors.barplot.{SCALE_PLOT.get('format', 'pdf')}",
+            tsv=f"{SCALE_DIR}/{{protein}}.scale_factors.tsv",
+        wildcard_constraints:
+            protein=alternation(sorted({m["protein"] for m in SAMPLES.values() if not m["is_control"]})),
+        params:
+            args=lambda wc: scale_barplot_args(wc.protein),
+        container:
+            container_path("deeptools")  # python3 + matplotlib
+        threads: res("process_single")["threads"]
+        resources:
+            mem_mb=res("process_single")["mem_mb"],
+        shell:
+            """
+            export MPLCONFIGDIR=${{TMPDIR:-/tmp}}/mplcfg
+            python3 {SCRIPTS}/scale_factor_barplot.py --protein {wildcards.protein} {params.args} \
+                --out {output.plot} --tsv {output.tsv}
+            """
+
+    rule deeptools_plotprofile_protein:
+        input:
+            f"{HEATMAP}/{{protein}}/{{protein}}.{{kind}}.{{region}}.computeMatrix.mat.gz",
+        output:
+            f"{HEATMAP}/{{protein}}/{{protein}}.{{kind}}.{{region}}.plotProfile.png",
+        wildcard_constraints:
+            protein=alternation(sorted({m["protein"] for m in SAMPLES.values() if not m["is_control"]})),
+            kind=alternation(HEATMAP_KINDS),
+            region=alternation(HEATMAP_REGIONS),
+        params:
+            args=config["plotprofile_args"],
+        container:
+            container_path("deeptools")
+        threads: res("process_low")["threads"]
+        resources:
+            mem_mb=res("process_low")["mem_mb"],
+        shell:
+            "plotProfile -m {input} -o {output} {params.args}"
+
+
 # =============================================================================
 # deepTools
 # =============================================================================
-PROFILE = f"{ML}/deepTools/plotProfile/{{sample}}.mLb.clN"
+PROFILE = f"{ML}/deepTools/plotProfile/{{sample}}.{CLNP}"
 
 
-# DEEPTOOLS_COMPUTEMATRIX
+# DEEPTOOLS_COMPUTEMATRIX. The gene BED (gtf2bed, BED12) carries each gene's strand,
+# and computeMatrix scale-regions reverses minus-strand genes, so the TSS is
+# always on the left of the profile/heatmap and the TES on the right.
 rule deeptools_computematrix:
     input:
         bigwig=bigwig("{sample}"),
@@ -1863,7 +2388,7 @@ rule deeptools_computematrix:
         """
         ln -s $(realpath {input.bigwig}) $(basename {input.bigwig})
         ln -s $(realpath {input.bed}) {GENE_BED_NAME}
-        p={wildcards.sample}.mLb.clN
+        p={wildcards.sample}.{CLNP}
         computeMatrix {params.args} --regionsFileName {GENE_BED_NAME} --scoreFileName $(basename {input.bigwig}) \
             --outFileName $p.computeMatrix.mat.gz --outFileNameMatrix $p.computeMatrix.vals.mat.tab \
             --numberOfProcessors {threads}
@@ -1889,7 +2414,7 @@ rule deeptools_plotprofile:
     shell:
         """
         ln -s $(realpath {input}) $(basename {input})
-        p={wildcards.sample}.mLb.clN
+        p={wildcards.sample}.{CLNP}
         plotProfile --matrixFile $(basename {input}) --outFileName $p.plotProfile.pdf --outFileNameData $p.plotProfile.tab
         mv $p.plotProfile.pdf {output.pdf}
         mv $p.plotProfile.tab {output.tab}
@@ -1913,7 +2438,7 @@ rule deeptools_plotheatmap:
     shell:
         """
         ln -s $(realpath {input}) $(basename {input})
-        p={wildcards.sample}.mLb.clN
+        p={wildcards.sample}.{CLNP}
         plotHeatmap --matrixFile $(basename {input}) --outFileName $p.plotHeatmap.pdf --outFileNameMatrix $p.plotHeatmap.mat.tab
         mv $p.plotHeatmap.pdf {output.pdf}
         mv $p.plotHeatmap.mat.tab {output.tab}
@@ -1921,9 +2446,14 @@ rule deeptools_plotheatmap:
 
 
 def ip_control_bams(s):
-    ctrl = SAMPLES[s]["control"]
+    ctrl = SAMPLES[s]["control"]  # empty: port-sheet ChIP sample without a control
     return {"ip": clean_bam(s), "ip_bai": f"{clean_bam(s)}.bai",
-            "control": clean_bam(ctrl), "control_bai": f"{clean_bam(ctrl)}.bai"}
+            "control": clean_bam(ctrl) if ctrl else [], "control_bai": f"{clean_bam(ctrl)}.bai" if ctrl else []}
+
+
+def macs3_control_arg(s):
+    ctrl = SAMPLES[s]["control"]
+    return f"--control {os.path.basename(clean_bam(ctrl))}" if ctrl else ""
 
 
 LINK_IP_CONTROL = """
@@ -1938,14 +2468,17 @@ rule deeptools_plotfingerprint:
     input:
         unpack(lambda wc: ip_control_bams(wc.sample)),
     output:
-        pdf=f"{ML}/deepTools/plotFingerprint/{{sample}}.mLb.clN.plotFingerprint.pdf",
-        raw=f"{ML}/deepTools/plotFingerprint/{{sample}}.mLb.clN.plotFingerprint.raw.txt",
-        qc=f"{ML}/deepTools/plotFingerprint/{{sample}}.mLb.clN.plotFingerprint.qcmetrics.txt",
+        pdf=f"{ML}/deepTools/plotFingerprint/{{sample}}.{CLNP}.plotFingerprint.pdf",
+        raw=f"{ML}/deepTools/plotFingerprint/{{sample}}.{CLNP}.plotFingerprint.raw.txt",
+        qc=f"{ML}/deepTools/plotFingerprint/{{sample}}.{CLNP}.plotFingerprint.qcmetrics.txt",
     params:
         args=lambda wc: join_args([args("plotfingerprint"), f"--numberOfSamples {config['fingerprint_bins']}",
-                                   f"--labels {wc.sample} {SAMPLES[wc.sample]['control']}"]),
+                                   f"--labels {wc.sample} {SAMPLES[wc.sample]['control']}".rstrip()]),
         extend_reads=lambda wc: (f"--extendReads {config['fragment_size']}"
                            if SAMPLES[wc.sample]["single_end"] and float(config["fragment_size"] or 0) > 0 else ""),
+        # IP + control (port sheets: IP alone when it has no control)
+        bams=lambda wc: " ".join(os.path.basename(b) for b in (ip_control_bams(wc.sample)["ip"],
+                                                              ip_control_bams(wc.sample)["control"]) if b),
     container:
         container_path("deeptools")
     threads: res("process_high")["threads"]
@@ -1955,9 +2488,9 @@ rule deeptools_plotfingerprint:
         "minimal"
     shell:
         LINK_IP_CONTROL + """
-        p={wildcards.sample}.mLb.clN
+        p={wildcards.sample}.{CLNP}
         plotFingerprint {params.args} {params.extend_reads} \
-            --bamfiles $(basename {input.ip}) $(basename {input.control}) \
+            --bamfiles {params.bams} \
             --plotFile $p.plotFingerprint.pdf --outRawCounts $p.plotFingerprint.raw.txt \
             --outQualityMetrics $p.plotFingerprint.qcmetrics.txt --numberOfProcessors {threads}
         mv $p.plotFingerprint.pdf {output.pdf}
@@ -2040,6 +2573,7 @@ rule macs3_callpeak:
         format=lambda wc: MACS3_FORMAT or ("BAM" if SAMPLES[wc.sample]["single_end"] else "BAMPE"),
         gsize=param("macs_gsize") or "",
         outdir=MACS,
+        control=lambda wc: macs3_control_arg(wc.sample),
     container:
         container_path("macs3")
     threads: res("process_medium")["threads"]
@@ -2052,7 +2586,7 @@ rule macs3_callpeak:
         GSIZE="{params.gsize}"
         if [ -z "$GSIZE" ]; then GSIZE=$(tr -d '[:space:]' < {input.kmers}); fi
         macs3 callpeak {params.args} --gsize $GSIZE --format {params.format} --name {wildcards.sample} \
-            --treatment $(basename {input.ip}) --control $(basename {input.control})
+            --treatment $(basename {input.ip}) {params.control}
         mkdir -p {params.outdir}
         for f in {output}; do mv $(basename $f) $f; done
         """
@@ -2061,11 +2595,11 @@ rule macs3_callpeak:
 # Groovy filter in BAM_PEAKS_CALL_QC_ANNOTATE_MACS3_HOMER: peaks.size() > 0
 checkpoint peak_summary:
     input:
-        lambda wc: [peak_file(s) for s in ip_samples()],
+        lambda wc: [peak_file(s) for s in macs_samples()],
     output:
         f"{W}/status/peak_summary.json",
     params:
-        samples=lambda wc: ip_samples(),
+        samples=lambda wc: macs_samples(),
     run:
         sizes = {s: os.path.getsize(f) for s, f in zip(params.samples, input)}
         with open(output[0], "w") as fh:
@@ -2322,7 +2856,7 @@ rule annotate_boolean_peaks:
 
 def antibody_bams(wc):
     """ch_antibody_bams: IP BAMs of the antibody (sorted by file name)."""
-    bams = [clean_bam(s) for s in ip_samples() if SAMPLES[s]["antibody"] == wc.antibody]
+    bams = [clean_bam(s) for s in macs_samples() if SAMPLES[s]["antibody"] == wc.antibody]
     return sorted(bams, key=os.path.basename)
 
 
@@ -2375,7 +2909,8 @@ rule deseq2_qc:
            for i, n in enumerate(deseq2_names("{antibody}")[:-1])},
         size_factors=directory(f"{MACS}/consensus/{{antibody}}/deseq2/size_factors"),
     params:
-        args=args("deseq2_qc") + (" --vst TRUE" if flag("deseq2_vst") else ""),
+        # the config keeps the nf-core suffix; port sheets name the BAMs differently
+        args=args("deseq2_qc").replace(".mLb.clN.sorted.bam", CLEAN_SUFFIX) + (" --vst TRUE" if flag("deseq2_vst") else ""),
         index=lambda wc: deseq2_antibodies().index(wc.antibody) + 1,
         outdir=f"{MACS}/consensus/{{antibody}}/deseq2",
     container:
@@ -2450,7 +2985,7 @@ rule igv:
         for f in {input.consensus}; do ln -s $(realpath $f) $d/macs3/{PEAK_TYPE}/consensus/$(basename $f); done
         for f in {input.mappings}; do ln -s $(realpath $f) stage/mappings/$(basename $f); done
         cd stage
-        find * -type l -name "*.bigWig" -exec echo -e ""{{}}"\\t0,0,178" \\; > bigwig.igv.txt
+        find * -type l -name "*.{BW}" -exec echo -e ""{{}}"\\t0,0,178" \\; > bigwig.igv.txt
         find * -type l -name "*Peak" -exec echo -e ""{{}}"\\t0,0,178" \\; > peaks.igv.txt
         # Avoid error when consensus not produced
         find * -type l -name "*.bed" -exec echo -e ""{{}}"\\t0,0,178" \\; | {{ grep "^{params.consensus_dir}" || test $? = 1; }} > consensus.igv.txt
@@ -2484,15 +3019,15 @@ def multiqc_inputs(wc):
     d["alignment/library"] = [f for l in libs for f in stats_files(lib_bam(l))]
     d["alignment/merged_library/unfiltered"] = [f for s in samples for f in stats_files(mkd_bam(s))]
     d["alignment/merged_library/unfiltered/picard_metrics"] = [
-        f"{ML}/picard_metrics/{s}.mLb.mkD.sorted.MarkDuplicates.metrics.txt" for s in samples]
+        f"{ML}/picard_metrics/{s}.{MKDS}.MarkDuplicates.metrics.txt" for s in samples]
     d["alignment/merged_library/filtered"] = [f for s in samples for f in stats_files(clean_bam(s))]
     d["alignment/merged_library/filtered/picard_metrics"] = (
         [] if flag("skip_picard_metrics") else [f for s in samples for f in cmm_metrics(s)])
-    d["preseq"] = [] if flag("skip_preseq") else [f"{ML}/preseq/{s}.mLb.mkD.lc_extrap.txt" for s in samples]
-    d["deeptools"] = [] if flag("skip_plot_profile") else [
-        f"{ML}/deepTools/plotProfile/{s}.mLb.clN.plotProfile.tab" for s in samples]
+    d["preseq"] = [] if flag("skip_preseq") else [f"{ML}/preseq/{s}.{MKDP}.lc_extrap.txt" for s in samples]
+    d["deeptools"] = [] if flag("skip_plot_profile") or NEW_SHEET else [
+        f"{ML}/deepTools/plotProfile/{s}.{CLNP}.plotProfile.tab" for s in samples]
     if not flag("skip_plot_fingerprint"):
-        d["deeptools"] += [f"{ML}/deepTools/plotFingerprint/{s}.mLb.clN.plotFingerprint.raw.txt" for s in ips]
+        d["deeptools"] += [f"{ML}/deepTools/plotFingerprint/{s}.{CLNP}.plotFingerprint.raw.txt" for s in ips]
     d["phantompeakqualtools"] = [] if flag("skip_spp") else [
         f"{ML}/phantompeakqualtools/{s}.{x}" for s in samples
         for x in ("spp.out", "spp_nsc_mqc.tsv", "spp_rsc_mqc.tsv", "spp_correlation_mqc.tsv")]
@@ -2561,13 +3096,18 @@ rule multiqc:
         config=f"{ASSETS}/multiqc_config.yml",
         extra_config=param("multiqc_config") or [],
     output:
-        report=f"{O}/multiqc/{PEAK_TYPE}/multiqc_report.html",
-        data=directory(f"{O}/multiqc/{PEAK_TYPE}/multiqc_data"),
-        plots=directory(f"{O}/multiqc/{PEAK_TYPE}/multiqc_plots"),
+        report=f"{MQC_DIR}/multiqc_report.html",
+        data=directory(f"{MQC_DIR}/multiqc_data"),
+        plots=directory(f"{MQC_DIR}/multiqc_plots"),
     params:
         title=f"--title \"{config['multiqc_title']}\"" if param("multiqc_title") else "",
         custom=lambda wc, input: f"--config {os.path.abspath(input.extra_config)}" if input.extra_config else "",
         stage=multiqc_stage_cmd,
+        # port sheets: section path filters and sample-name cleaning use the port suffixes
+        rename=(" ".join(f"-e 's/{a}/{b}/g'" for a, b in (
+            (r"\.mLb\.mkD\.sorted\.bam", f".{MKDS}.bam"), (r"\.mLb\.clN\.sorted\.bam", f".{CLNS}.bam"),
+            (r'"\.Lb"', '".lib"'), (r'"mkD"', '".markedDup"'), (r'"clN"', '".final"'),
+            (r'"mLb"', '".merged_lib"'))) if NEW_SHEET else "-e ''"),
     container:
         container_path("multiqc")
     threads: res("process_medium")["threads"]
@@ -2578,7 +3118,7 @@ rule multiqc:
     shell:
         """
         mkdir -p stage
-        ln -s $(realpath {input.config}) stage/multiqc_config.yml
+        sed {params.rename} $(realpath {input.config}) > stage/multiqc_config.yml
         {params.stage}
         mkdir -p stage/versions && ln -s $(realpath {input.versions}) stage/versions/
         cd stage

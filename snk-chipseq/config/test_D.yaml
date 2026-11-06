@@ -2,7 +2,6 @@
 # library below min_trimmed_reads (tiny), single-replicate antibody (SOLO), likely-empty peaks (EMPTY)
 input: "config/samplesheet_edge_local.csv"
 outdir: "results_D"
-workdir: "work_D"
 gtf: "/scratch/andygg98/claude_jobs/chipseq_testdata/genes.gtf"
 gff: ""
 bwa_index: "/scratch/andygg98/claude_jobs/chipseq_testdata/bwa_index.tar.gz"

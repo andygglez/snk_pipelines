@@ -10,8 +10,10 @@ the treatment coefficient directly.
 Outputs (in --outdir):
   deseq2.normalized_counts.tsv, deseq2.vst.tsv, deseq2.size_factors.tsv,
   deseq2.pca.pdf, deseq2.pca.tsv
-  <treatment>_vs_<baseline>/<treatment>_vs_<baseline>.deseq2.results.tsv
-  <treatment>_vs_<baseline>/<treatment>_vs_<baseline>.deseq2.significant.tsv
+  <treatment>_vs_<baseline>/<treatment>_vs_<baseline>.deseq2.results.csv      (every tested gene)
+  <treatment>_vs_<baseline>/<treatment>_vs_<baseline>.deseq2.significant.csv  (padj < --padj, |log2FC| >= --lfc)
+Report columns: gene_id, gene_name, baseMean, log2FoldChange, lfcSE, stat, pvalue,
+padj, log2FoldChange_unshrunk (log2FoldChange and lfcSE are shrunk with --shrink).
 """
 
 import argparse
@@ -154,9 +156,9 @@ def main():
         res = res.sort_values(["padj", "pvalue"], na_position="last")
         d = os.path.join(args.outdir, name)
         os.makedirs(d, exist_ok=True)
-        res.to_csv(os.path.join(d, f"{name}.deseq2.results.tsv"), sep="\t", index_label="gene_id")
+        res.to_csv(os.path.join(d, f"{name}.deseq2.results.csv"), index_label="gene_id")
         sig = res[(res["padj"] < args.padj) & (res["log2FoldChange"].abs() >= args.lfc)]
-        sig.to_csv(os.path.join(d, f"{name}.deseq2.significant.tsv"), sep="\t", index_label="gene_id")
+        sig.to_csv(os.path.join(d, f"{name}.deseq2.significant.csv"), index_label="gene_id")
         print(f"{name}: {len(sig)} significant genes (padj < {args.padj}, |log2FC| >= {args.lfc}; "
               f"{(sig['log2FoldChange'] > 0).sum()} up, {(sig['log2FoldChange'] < 0).sum()} down)")
 

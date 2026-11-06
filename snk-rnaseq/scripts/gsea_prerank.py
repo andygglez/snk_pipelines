@@ -48,7 +48,7 @@ def main():
     os.makedirs(os.path.join(args.outdir, "enrichment_plots"), exist_ok=True)
     out = lambda name: os.path.join(args.outdir, name)  # noqa: E731
 
-    res = pd.read_csv(args.results, sep="\t")
+    res = pd.read_csv(args.results)  # <contrast>.deseq2.results.csv
     res = res[res["stat"].notna()].copy()
     res["id"] = res[args.gene_id].fillna(res["gene_id"]).astype(str)
     res = res.reindex(res["stat"].abs().sort_values(ascending=False).index).drop_duplicates("id")

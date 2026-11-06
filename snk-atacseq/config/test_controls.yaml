@@ -2,7 +2,6 @@
 # Usage: snakemake --cores 2 --sdm apptainer --configfile config/test_controls.yaml
 input: "config/samplesheet_controls.csv"
 outdir: "results_test_controls"
-workdir: "work_test_controls"
 read_length: 50
 mito_name: "MT"
 fasta: "https://raw.githubusercontent.com/nf-core/test-datasets/atacseq/reference/genome.fa"

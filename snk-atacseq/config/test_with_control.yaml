@@ -2,7 +2,6 @@
 # Usage: snakemake --cores 2 --sdm apptainer --configfile config/test_with_control.yaml
 input: "config/samplesheet_controls.csv"
 outdir: "results_with_control"
-workdir: "work_with_control"
 with_control: true
 read_length: 50
 mito_name: "MT"

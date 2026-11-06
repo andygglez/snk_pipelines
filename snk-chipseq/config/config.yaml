@@ -6,14 +6,31 @@
 # =============================================================================
 
 # ---- Input / output ---------------------------------------------------------
-# CSV with header: sample,fastq_1,fastq_2,replicate,antibody,control,control_replicate
-# (validated by scripts/check_samplesheet.py, as SAMPLESHEET_CHECK does).
+# Two samplesheet formats, told apart by the header:
+#
+# Port format (default; not nf-core):
+#   condition,protein,rep,type,fastq1,fastq2,scale_factor
+#   - Required: condition, protein, rep, fastq1. Optional (column may be missing or
+#     the cell empty): fastq2 (empty = single-end), scale_factor (default 1), type.
+#   - Sample ID / file prefix: <condition>_<protein>_<rep>. Rows with the same
+#     three values are runs of one sample and are merged. rep has no '_'.
+#   - type: broad | narrow, one per protein. MACS3 (narrow mode) runs only for
+#     narrow proteins; broad marks (e.g. H3K36me2) get BAMs, .bw tracks and QC.
+#   - protein input or IgG (any case) = control row (type left empty). A ChIP
+#     sample uses the control of its condition with the same rep, else that
+#     condition's only control; if only one condition has controls they are
+#     shared by all. No control = MACS3 runs without one.
+#   - scale_factor multiplies the RPM coverage of the .bw track.
+#   - BAM suffixes .lib / .merged_lib / .markedDup / .filtered / .final, tracks
+#     .bw, no IGV session (`narrow_peak` and `skip_igv` are ignored).
+# nf-core format (validated by scripts/check_samplesheet.py; kept for nf-core parity):
+#   sample,fastq_1,fastq_2,replicate,antibody,control,control_replicate
 # Paths may be local or http(s)/ftp URLs.
 input: "config/samplesheet.csv"  ### <path to samplesheet CSV>
 outdir: "results"            ### <directory>
-# Intermediate files that nf-core keeps in its work/ directory. Kept outside
-# outdir so outdir mirrors the nf-core publishDir layout file for file.
-workdir: "work"              ### <directory>
+# Intermediate files that nf-core keeps in its work/ directory. Empty = <outdir>/temp_workdir
+# (delete it once the run is done; everything nf-core publishes is outside it).
+workdir: ""                  ### <directory, or "" for <outdir>/temp_workdir>
 
 # ---- References -------------------------------------------------------------
 # iGenomes: `genome` fills every reference parameter left empty from
@@ -59,7 +76,7 @@ fragment_size: 200           ### <integer>
 fingerprint_bins: 500000     ### <integer>
 
 # ---- Peak calling -----------------------------------------------------------
-narrow_peak: false           ### [true, false]
+narrow_peak: false           ### [true, false]  # nf-core sheets only (port sheets: per-protein `type`)
 broad_cutoff: 0.1            ### <number>
 macs_fdr: ""                 ### <number, or "" for none>
 macs_pvalue: ""              ### <number, or "" for none>
@@ -79,7 +96,48 @@ skip_preseq: false           ### [true, false]
 skip_plot_profile: false     ### [true, false]
 skip_plot_fingerprint: false ### [true, false]
 skip_spp: false              ### [true, false]
-skip_igv: false              ### [true, false]
+skip_igv: false              ### [true, false]  # nf-core sheets only (port sheets never write IGV)
+
+# ---- Tracks and heatmaps (port-format samplesheet only) -----------------------
+# bigwig/replicate_bws/<condition>_<protein>_<rep>.final.bw         RPM
+# bigwig/replicate_bws/<condition>_<protein>_<rep>.final.scaled.bw  RPM x scale_factor
+# bigwig/sample_bws/<condition>_<protein>.final.bw                  mean of the replicate .final.bw
+# bigwig/sample_bws/<condition>_<protein>.final.scaled.bw           that mean x the mean replicate scale_factor (bigwigAverage --scaleFactors)
+bigwig_merge_binsize: 10     ### <integer>  # -bs of bigwigCompare / bigwigAverage for the sample bigWigs
+# deepTools/heatmaps/<protein>/: per protein (all conditions together), bigWig kind
+# (replicate, replicate_scaled, sample, sample_scaled) and region set, one
+# computeMatrix with its plotHeatmap and plotProfile:
+#   tss               reference-point on the TSS (narrow proteins only)
+#   genes             scale-regions over gene bodies (strand-aware: TSS on the left)
+#   intergenic        scale-regions over intergenic_bed, or (when empty) the gaps between
+#                     genes (bedtools complement of the gene BED); scale-regions only
+#   enhancers_center  reference-point on the centre of enhancer_bed regions
+#   enhancers_scaled  scale-regions over enhancer_bed regions
+# `blacklist`, when set, is passed as -bl. skip_plot_profile turns them all off.
+# Region BED files for these plots (genes and tss use `gene_bed` from References):
+enhancer_bed: ""             ### <path or URL: .bed(.gz), or "">  # empty = no enhancer plots
+intergenic_bed: ""           ### <path or URL: .bed(.gz), or "">  # empty = built: bedtools complement of the gene BED
+computematrix_scale_regions_args: "--binSize 2500 -a 10000 -b 10000 -m 20000 --missingDataAsZero --skipZeros"  ### <string: computeMatrix scale-regions arguments (genes, intergenic, enhancers_scaled)>
+computematrix_reference_point_args: "--referencePoint TSS --binSize 2500 -a 10000 -b 10000 --missingDataAsZero --skipZeros"  ### <string: computeMatrix reference-point arguments (tss)>
+computematrix_enhancer_reference_point_args: "--referencePoint center --binSize 2500 -a 10000 -b 10000 --missingDataAsZero --skipZeros"  ### <string: computeMatrix reference-point arguments (enhancers_center)>
+computematrix_processors: "max/2"  ### <integer or "max/2" or "max">  # computeMatrix -p
+plotheatmap_args: "--dpi 600 --perGroup --colorMap Reds"  ### <string: plotHeatmap arguments>
+plotprofile_args: "--dpi 600 --perGroup"  ### <string: plotProfile arguments>
+
+# ---- Scale-factor bar plots (port-format samplesheet only) --------------------
+# scale_factors/<protein>.scale_factors.barplot.<format> (+ .tsv with the values):
+# one bar per condition = mean samplesheet scale_factor of its replicates, an
+# error bar and one dot per replicate. Made for every protein that has at least
+# one scale_factor written in the samplesheet.
+scale_factor_barplot:
+  enabled: true                ### [true, false]
+  title: "{protein}"           ### <string>  # {protein} is replaced by the protein name
+  xlabel: ""                   ### <string>
+  ylabel: "Scale factor"       ### <string>
+  order: []                    ### <list of conditions>  # x-axis order; empty = samplesheet order (unlisted conditions go last)
+  colors: ["#5677cd", "#000000", "#0e560e", "#4a1170"]  ### <list of colours (by x position), or {condition: colour}>
+  error: "sd"                  ### ["sd", "sem"]
+  format: "pdf"                ### ["pdf", "png", "svg"]
 skip_multiqc: false          ### [true, false]
 
 # ---- MultiQC ----------------------------------------------------------------
@@ -124,3 +182,4 @@ resources:
   process_low:     {threads: 2,  mem_mb: 12288}  ### {threads: <integer>, mem_mb: <integer>}
   process_medium:  {threads: 6,  mem_mb: 36864}  ### {threads: <integer>, mem_mb: <integer>}
   process_high:    {threads: 12, mem_mb: 73728}  ### {threads: <integer>, mem_mb: <integer>}
+  bigwig_merge:    {threads: 6,  mem_mb: 8192}   ### {threads: <integer>, mem_mb: <integer>}  # bigwigCompare / bigwigAverage -p

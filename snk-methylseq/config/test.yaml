@@ -2,7 +2,6 @@
 # Usage: snakemake --cores 4 --sdm apptainer --configfile config/test.yaml
 input: "config/samplesheet.csv"
 outdir: "results_test"
-workdir: "work_test"
 
 fasta: "https://raw.githubusercontent.com/nf-core/test-datasets/methylseq/reference/genome.fa.gz"
 fasta_index: "https://raw.githubusercontent.com/nf-core/test-datasets/methylseq/reference/genome.fa.fai"

@@ -94,7 +94,7 @@ from atacseq_utils import (  # noqa: E402
 import check_samplesheet  # noqa: E402
 
 O = config["outdir"].rstrip("/")
-W = config["workdir"].rstrip("/")
+W = (config.get("workdir") or f"{O}/temp_workdir").rstrip("/")
 
 # nextflow.config env{} and process.shell (bash -e -u -o pipefail).
 # HPC hosts (Lmod) export a `which` shell function that leaks into containers

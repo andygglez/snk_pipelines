@@ -98,7 +98,7 @@ IGENOME = apply_igenomes()
 ASSETS = os.path.join(workflow.basedir, "assets")
 
 O = config["outdir"].rstrip("/")
-W = config["workdir"].rstrip("/")
+W = (config.get("workdir") or f"{O}/temp_workdir").rstrip("/")
 O_ABS = os.path.abspath(O)
 
 # nextflow.config env{} and process.shell (bash -e -u -o pipefail).

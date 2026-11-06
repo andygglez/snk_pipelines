@@ -3,7 +3,6 @@
 # Usage: snakemake --cores 2 --sdm apptainer --configfile config/test_controls.yaml
 input: "config/samplesheet_controls_local.csv"
 outdir: "results_test_controls"
-workdir: "work_test_controls"
 read_length: 50
 mito_name: "MT"
 fasta: "/scratch/andygg98/claude_jobs/chipseq_testdata/genome.fa"

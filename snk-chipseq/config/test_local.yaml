@@ -3,7 +3,6 @@
 # Usage: snakemake --cores 2 --sdm apptainer --configfile config/test.yaml
 input: "config/samplesheet_local.csv"   # offline copy of samplesheet.csv (Rorqual)
 outdir: "results_test"
-workdir: "work_test"
 
 fasta: "/scratch/andygg98/claude_jobs/chipseq_testdata/genome.fa"
 gtf: "/scratch/andygg98/claude_jobs/chipseq_testdata/genes.gtf"
