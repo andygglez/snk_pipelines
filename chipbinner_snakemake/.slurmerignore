@@ -18,3 +18,7 @@ venv/
 /error_*.log
 /output_*.log
 /.cache/
+# the user's run configuration and reference files on Rorqual: never overwritten or deleted by sync
+/config/config.yaml
+/config/sample_list.csv
+/references/
