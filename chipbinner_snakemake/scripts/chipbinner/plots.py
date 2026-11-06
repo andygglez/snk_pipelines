@@ -14,6 +14,7 @@ Both compare two conditions bin by bin: x = wild-type score, y = treated score.
 from __future__ import annotations
 
 import os
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -112,7 +113,14 @@ def auto_range(pair, xbins=150, quantiles=(0.001, 0.999), min_count=10, square=F
     dense = cells[cells["count"] > min_count]
     if dense.empty:
         dense = cells
-    r = [float(dense["x"].min()), float(dense["x"].max()), float(dense["y"].min()), float(dense["y"].max())]
+    r = []
+    for ax in ("x", "y"):
+        lo, hi = float(dense[ax].min()), float(dense[ax].max())
+        if not lo < hi:  # too few bins for > min_count hexes to span this axis (tiny data / fine grid)
+            lo, hi = float(cells[ax].min()), float(cells[ax].max())
+            warnings.warn(f"auto range: hexes with > {min_count} bins do not span {ax}; "
+                          f"using every occupied hex ({lo:.3g}..{hi:.3g})")
+        r += [lo, hi]
     if square:
         lo, hi = min(r[0], r[2]), max(r[1], r[3])
         r = [lo, hi, lo, hi]
