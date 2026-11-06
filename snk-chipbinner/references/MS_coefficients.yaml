@@ -1,0 +1,5 @@
+# {<Rep file without .bam>: MS coefficient}
+treatment1_rep1: 1.0
+treatment1_rep2: 1.0
+control1_rep1: 1.0
+control1_rep2: 1.0

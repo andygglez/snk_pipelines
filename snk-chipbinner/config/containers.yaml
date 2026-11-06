@@ -1,0 +1,12 @@
+# Singularity/Apptainer image per tool (paths relative to snk-chipbinner/). Repoint images here only.
+containers:
+  # bam2bed / binning_windows (snakemake_chipbinner called bedtools directly too)
+  bedtools: containers/depot.galaxyproject.org-singularity-bedtools-2.30.0--hc088bd4_0.img
+  # Python ChIPbinner port: numpy, pandas, scipy, scikit-learn, hdbscan, pyBigWig, plotly + kaleido.
+  # No public image bundles these: build it once on the Rorqual login node (internet needed):
+  #   apptainer build containers/chipbinner.sif containers/chipbinner.def
+  chipbinner: containers/chipbinner.sif
+
+# `pipeline pull chipbinner` downloads these; chipbinner has no URL (built from chipbinner.def).
+container_urls:
+  bedtools: https://depot.galaxyproject.org/singularity/bedtools:2.30.0--hc088bd4_0

@@ -1,0 +1,22 @@
+Bootstrap: docker
+From: mambaorg/micromamba:1.5.10
+
+# Image for the Python ChIPbinner port (snk-chipbinner rules other than bedtools).
+# Build on a node with internet (Rorqual login node):
+#   apptainer build containers/chipbinner.sif containers/chipbinner.def
+# kaleido 0.2.1 bundles its own Chromium, so static PDF/PNG export works offline;
+# plotly is pinned to 5.x, the last series that drives kaleido 0.2.x.
+
+%post
+    micromamba install -y -n base -c conda-forge -c bioconda \
+        python=3.11 numpy=1.26 pandas=2.2 scipy=1.13 scikit-learn=1.5 hdbscan=0.8.39 \
+        pyyaml=6.0 pybigwig=0.3.22 pysam=0.22 plotly=5.24.1 pip
+    /opt/conda/bin/pip install --no-cache-dir kaleido==0.2.1
+    micromamba clean -a -y
+
+%environment
+    export PATH=/opt/conda/bin:$PATH
+    export MPLCONFIGDIR=/tmp/mplcfg
+
+%test
+    /opt/conda/bin/python -c "import numpy, pandas, scipy, sklearn, hdbscan, pyBigWig, pysam, plotly, kaleido, yaml"

@@ -1,0 +1,32 @@
+# Test profile: SYNTHETIC BAMs (tools/make_synthetic_bams.py; hg38 chr21 + chr22, 2 replicates of WT
+# and KO, H3K36me2) exercising every rule. Run with --configfile config/test.yaml.
+# test_data/ holds the BAMs and the downsampled LOLA region DB (not in git; copy from
+# chipbinner_reimplementation/example_data/{synthetic,regionDB_hg38_downsampled}).
+general:
+  organism: hg38
+  MS_normalize: true
+  merge_replicates: true
+  filter_low_counts: 5
+  use_input: false
+inputs:
+  sample_folder: test_data/synthetic
+  sample_list: config/sample_list_test.csv
+outdir: results_test/outdir
+references:
+  MS_yaml: config/MS_coefficients_test.yaml
+norm: {depth_norm: true, raw_count_cutoff: 0, pseudocount: 1.0e-3}
+comparisons:
+  - KO_WT
+  - {treatment: WT, control: KO}
+comparison_parameters:
+  WT_KO_H3K36me2: {range: {x: [2.5, 7.5], y: auto}, pow: 1.1}
+clustering: {minpts: [100, 400], minsamps: [100, 400], number_of_clusters: [2, 3]}
+formats: [pdf, html]
+differential: {enabled: true, bootstrap: 100, K: 2000, clusters: {minpts: 100, minsamps: 100, number_of_clusters: 2}}
+enrichment: {enabled: true, db_dir: test_data/regionDB_hg38_downsampled, regions: [genome_wide, genic, intergenic],
+             clusters: {minpts: 100, minsamps: 100, number_of_clusters: 2}}
+resources:
+  default: {mem_mb: 2000, threads: 1}
+  bam2bed: {mem_mb: 2000, threads: 1}
+  clustering: {mem_mb: 4000, threads: 2}
+binning: {keep_read_bed: true, sort_mem: 500M}

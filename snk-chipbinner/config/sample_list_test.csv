@@ -1,0 +1,3 @@
+Rep1,Rep2,Condition,Mark
+WT_rep1_H3K36me2.bam,WT_rep2_H3K36me2.bam,WT,H3K36me2
+KO_rep1_H3K36me2.bam,KO_rep2_H3K36me2.bam,KO,H3K36me2

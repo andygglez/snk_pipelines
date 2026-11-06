@@ -1,0 +1,3 @@
+Rep1,Rep2,Condition,Mark
+treatment1_rep1.bam,treatment1_rep2.bam,treatment1,H3K36me2
+control1_rep1.bam,control1_rep2.bam,control1,H3K36me2

@@ -1,0 +1,7 @@
+.snakemake/
+results*/
+outdir/
+test_data/
+containers/*.img
+containers/*.sif
+__pycache__/

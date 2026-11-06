@@ -1,0 +1,100 @@
+# snk-chipbinner: andygglez/snakemake_chipbinner on the Python ChIPbinner port
+# (padilr1/ChIPbinner reimplemented in scripts/chipbinner/; no pinned upstream release).
+# Sections general / inputs / references / comparisons / comparison_parameters are the ones
+# snakemake_chipbinner's genconfig.py writes; the rest are new options with its defaults.
+
+general:
+  analysis: chipbinner
+  organism: hg38                  # hg38 | mm10 -> shipped annotations/ (genic, intergenic, blacklist, chrom.sizes)
+  MS_normalize: false             # true -> outdir/MSbigwigs*, scaling factor = MS coefficient (references.MS_yaml)
+  merge_replicates: true          # Rep1 + Rep2 -> mean bigWig; false -> Rep1 only
+  filter_low_counts: false        # false, or a raw-count cutoff (ChIPbinner::filter_low_counts)
+  use_input: false                # true: log2(ChIP/input) with the Input1/Input2 columns
+
+inputs:
+  sample_folder: samples          # relative sample_list cells are looked up here
+  sample_list: config/sample_list.csv
+
+outdir: outdir                    # snakemake_chipbinner writes everything under outdir/
+workdir: ""                       # "" = <outdir>/temp_workdir (binning windows)
+
+references:
+  blacklist: ""                   # "" = annotations/<organism>_blacklist.bed.gz
+  binning_windows: ""             # windows BED; "" = bedtools makewindows on chrom_sizes, every bin_size
+  bin_size: 10000
+  chrom_sizes: ""                 # "" = annotations/<organism>.chrom.sizes
+  gene_bed: ""                    # "" = annotations/<organism>_genic.bed.gz
+  igr_bed: ""                     # "" = annotations/<organism>_intergenic.bed.gz
+  MS_yaml: references/MS_coefficients.yaml   # {<Rep file without .bam>: coefficient}; used when MS_normalize
+
+# "<treatment>_<control>" as before (x axis = control, y axis = treatment), or a mapping:
+#   - {treatment: NSD1_KO, control: WT, range: auto, pow: 0.75, marks: all,
+#      overrides: {H3K36me2: {range: [-5, 1], pow: 1.25}}}
+comparisons:
+  - treatment1_control1
+
+# Plot range + pow per "<treatment>_<control>_<mark>". Missing entries = auto.
+#   "<min>_<max>_<pow>"  (snakemake_chipbinner format; min/max on both axes), e.g. "-5.2_0.41_0.75"
+#   auto
+#   {range: auto | [min, max] | {x: [min, max], y: auto}, pow: 0.75}
+# The range actually used goes to comparisons/<T>_<C>/<T>_<C>_<mark>.plot_range.yaml.
+comparison_parameters: {}
+
+plot_defaults:
+  range: auto                     # extent of the hexes holding > 10 bins
+  pow: 0.75                       # snakemake_chipbinner's --pow
+  square_auto_range: true         # auto: same limits on x and y
+
+genic_plot:
+  hexbins: 150
+  show_legend: false              # snakemake_chipbinner: show_legend = FALSE (legend.png is separate)
+  legend_pos: right
+  show_scales: true
+
+density_plot:
+  hexbins: 150
+  show_scales: false              # density.scatter.plot.R: show_scales = FALSE
+  include_additional_density_plot: true
+  filter_extreme_bins: true
+  cluster_colors: bright          # bright | alphabet (ChIPbinner's palette)
+
+clustering:                       # HDBSCAN grid, as `seq 100 300 1000` x `seq 100 300 1000`
+  minpts: [100, 400, 700, 1000]
+  minsamps: [100, 400, 700, 1000]
+  number_of_clusters: [2, 3]
+  cluster_selection_method: eom
+
+binning:
+  keep_read_bed: true             # keep outdir/bam2bed/<sample>.bed (bamtobed reads; large) as before
+  sort_mem: 2G                    # sort -S for the read BED
+
+norm:                             # ChIPbinner::norm_bw as called by chipbinner.norm.bw.R
+  depth_norm: true
+  raw_count_cutoff: 100
+  pseudocount: 1.0e-15
+
+formats: [pdf, html]              # pdf as before + interactive html (png/svg also accepted)
+
+# ChIPbinner functions snakemake_chipbinner never wired in
+pca: {enabled: true}              # outdir/exploratory/<mark>_PCA_plot.*
+correlation: {enabled: true, method: pearson}
+differential:                     # differentialBinAnalysis (ROTS): Rep1 + Rep2 in both conditions
+  enabled: false
+  bootstrap: 1000
+  K: 5000
+  clusters: {minpts: 100, minsamps: 100, number_of_clusters: 3}
+enrichment:                       # enrich_clust (LOLA): db_dir = LOLA regionDB/<genome> folder
+  enabled: false
+  db_dir: ""
+  regions: [genome_wide, genic, intergenic]
+  n_elements: 10
+  cutoff_for_overlap: 0
+  clusters: {minpts: 100, minsamps: 100, number_of_clusters: 3}
+
+resources:                        # per rule; missing keys fall back to default
+  default: {mem_mb: 4000, threads: 1}
+  bam2bed: {mem_mb: 4000, threads: 2}
+  clustering: {mem_mb: 16000, threads: 4}
+  compare: {mem_mb: 8000}
+  density_plot: {mem_mb: 8000}
+  differential: {mem_mb: 16000}

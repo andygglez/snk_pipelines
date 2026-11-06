@@ -1,0 +1,657 @@
+# snk-chipbinner: andygglez/snakemake_chipbinner rebuilt on the Python ChIPbinner port
+# (scripts/chipbinner/, a reimplementation of padilr1/ChIPbinner; see ../chipbinner_reimplementation).
+#
+# Same rules, config sections and outdir/ tree as snakemake_chipbinner:
+#   bam2bed -> [filter_low_counts] -> bed2bw -> merged_bw_files | notmerged_bw_files
+#   -> compare -> clustering -> annotate_clusters -> density_plot
+# plus ChIPbinner functions snakemake_chipbinner never wired in (each off/on in config.yaml):
+#   PCA / correlation (exploratory/), differential (ROTS), enrichment (LOLA).
+#
+# Changes from snakemake_chipbinner (all deliberate):
+#   * Every step runs the Python port in config/containers.yaml's `chipbinner` image
+#     (bam2bed: `bedtools` image), instead of ~/environments/chipbinner Rscript.
+#   * comparison_parameters keeps the "<min>_<max>_<pow>" strings, but a missing entry
+#     means `auto` and the range used is written to <T>_<C>_<mark>.plot_range.yaml;
+#     config.yaml is never rewritten by the pipeline.
+#   * Annotated clusters are BED (…annotated_clusters.bed) instead of .rda.
+#   * The HDBSCAN grid (minpts x minsamps) is one job per pair, and every pair's density
+#     plot is a declared output (the old rule declared only 100.100).
+#   * A condition may have one replicate while another has two (old limitation lifted);
+#     comparison names may contain "_" in condition names (split on known conditions).
+#   * Plots are written in every `formats` entry (pdf + interactive html by default).
+#   * legend.png is its own rule (one per comparison, as several marks share the folder).
+#   * Outputs are tracked by Snakemake, so there is no need to delete outdir/ before a rerun.
+import json
+import os
+import re
+
+import pandas as pd
+import yaml
+
+configfile: "config/config.yaml"
+configfile: "config/containers.yaml"
+
+G = config["general"]
+REF = config["references"]
+OUT = config.get("outdir") or "outdir"
+WORK = config.get("workdir") or f"{OUT}/temp_workdir"
+ORG = G["organism"]
+FORMATS = [str(f) for f in config["formats"]]
+STEPS = "python scripts/chipbinner_steps.py"
+
+
+def _ref(key, suffix):
+    return REF.get(key) or f"annotations/{ORG}{suffix}"
+
+
+GENE_BED = _ref("gene_bed", "_genic.bed.gz")
+IGR_BED = _ref("igr_bed", "_intergenic.bed.gz")
+BLACKLIST = _ref("blacklist", "_blacklist.bed.gz")
+CHROM_SIZES = _ref("chrom_sizes", ".chrom.sizes")
+
+MS = bool(G["MS_normalize"])
+BWF = "MSbigwigs" if MS else "notMSbigwigs"
+FILT = G.get("filter_low_counts") not in (False, None, "", 0, "no")
+SUF = "_filt" if FILT else ""
+MERGE = bool(G["merge_replicates"])
+USE_INPUT = bool(G.get("use_input"))
+
+
+def res(rule, key, default=None):
+    r = config["resources"]
+    return r.get(rule, {}).get(key, r["default"].get(key, default))
+
+
+# ------------------------------------------------------------------ samplesheet
+# config/sample_list.csv: Rep1,Rep2,Condition,Mark (+ optional Input1,Input2). A cell is a BAM
+# (binned here), a binned-count BED, or an already normalised bigWig (used as is).
+EXTS = (".binned.bed.gz", ".binned.bed", ".bed.gz", ".bed", ".bam", ".bigWig", ".bigwig", ".bw")
+
+
+def _stem(cell):
+    base = os.path.basename(cell)
+    for e in EXTS:
+        if base.endswith(e):
+            return base[: -len(e)]
+    return base
+
+
+def _kind(cell):
+    c = cell.lower()
+    return "bam" if c.endswith(".bam") else "bigwig" if c.endswith((".bw", ".bigwig")) else "bed"
+
+
+SHEET = pd.read_csv(config["inputs"]["sample_list"], dtype=str).fillna("")
+for col in ("Rep2", "Input1", "Input2"):
+    if col not in SHEET:
+        SHEET[col] = ""
+if not {"Rep1", "Condition", "Mark"} <= set(SHEET.columns):
+    raise ValueError("sample_list needs columns Rep1,Rep2,Condition,Mark (+ optional Input1,Input2)")
+
+SRC, KIND, INPUT_OF = {}, {}, {}
+
+
+def _register(cell):
+    s = _stem(cell)
+    p = cell if os.path.isabs(cell) else os.path.join(config["inputs"]["sample_folder"], cell)
+    if SRC.setdefault(s, p) != p:
+        raise ValueError(f"two samplesheet files share the name {s}: {SRC[s]} and {p}")
+    KIND[s] = _kind(cell)
+    return s
+
+
+ROWS_ALL = {}  # (condition, mark) -> every replicate stem (Rep1, Rep2)
+ROWS = {}      # (condition, mark) -> replicates feeding the final bigWig
+for _, r in SHEET.iterrows():
+    key = (r["Condition"], r["Mark"])
+    if key in ROWS_ALL:
+        raise ValueError(f"condition {key[0]}, mark {key[1]} appears twice in the sample list")
+    reps = []
+    for rep, inp in ((r["Rep1"], r["Input1"]), (r["Rep2"], r["Input2"] or r["Input1"])):
+        if not rep:
+            continue
+        s = _register(rep)
+        if USE_INPUT and inp and KIND[s] != "bigwig":
+            INPUT_OF[s] = _register(inp)
+        reps.append(s)
+    ROWS_ALL[key] = reps
+    ROWS[key] = reps if MERGE else reps[:1]
+
+CONDS = sorted({c for c, _ in ROWS})
+MARKS = sorted({m for _, m in ROWS})
+BAM_SAMPLES = sorted(s for s, k in KIND.items() if k == "bam")
+BED_SAMPLES = sorted(s for s, k in KIND.items() if k == "bed")
+BW_SAMPLES = sorted(s for s, k in KIND.items() if k == "bigwig")
+CHIP_SAMPLES = sorted({s for reps in ROWS_ALL.values() for s in reps})
+
+MS_COEF = {}
+if MS:
+    with open(REF["MS_yaml"]) as fh:
+        MS_COEF = yaml.safe_load(fh) or {}
+    missing = [s for s in CHIP_SAMPLES if KIND[s] != "bigwig" and s not in MS_COEF]
+    if missing:
+        raise ValueError(f"no MS coefficient in {REF['MS_yaml']} for: {', '.join(missing)}")
+
+
+def binned(s):
+    return f"{OUT}/bam2bed/{s}.binned.bed"
+
+
+def rep_bw(s):
+    return f"{OUT}/{BWF}/{s}.binned.bw" if KIND[s] == "bigwig" else f"{OUT}/{BWF}/{s}.binned{SUF}.bw"
+
+
+def final_bw(cond, mark):
+    return f"{OUT}/{BWF}_final/{cond}.{mark}.bw"
+
+
+# ------------------------------------------------------------------ comparisons
+def _parse_comparison(c):
+    if isinstance(c, str):  # "<treatment>_<control>"; conditions may contain "_"
+        parts = c.split("_")
+        for k in range(1, len(parts)):
+            t, ctl = "_".join(parts[:k]), "_".join(parts[k:])
+            if t in CONDS and ctl in CONDS:
+                return {"treatment": t, "control": ctl}
+        raise ValueError(f"comparison {c}: no split into two sample-list conditions")
+    c = dict(c)
+    for k in ("treatment", "control"):
+        if c.get(k) not in CONDS:
+            raise ValueError(f"comparison {c}: {k} {c.get(k)} is not a sample-list condition")
+    return c
+
+
+COMPS = {}
+for c in config.get("comparisons") or []:
+    d = _parse_comparison(c)
+    name = f"{d['treatment']}_{d['control']}"
+    marks = sorted({m for cc, m in ROWS if cc == d["treatment"]} & {m for cc, m in ROWS if cc == d["control"]})
+    if d.get("marks") not in (None, "all"):
+        marks = [m for m in marks if m in d["marks"]]
+    d["marks"] = marks
+    COMPS[name] = d
+COMP_MARKS = [(comp, m) for comp, d in COMPS.items() for m in d["marks"]]
+
+
+def plot_spec(comp, mark):
+    """range/pow for one comparison + mark: plot_defaults < comparison entry < overrides <
+    comparison_parameters["<T>_<C>_<mark>"] ("min_max_pow" string as in snakemake_chipbinner,
+    "auto", or {range: ..., pow: ...})."""
+    d = COMPS[comp]
+    p = dict(config["plot_defaults"])
+    p.update({k: d[k] for k in ("range", "pow") if k in d})
+    p.update((d.get("overrides") or {}).get(mark, {}))
+    cp = (config.get("comparison_parameters") or {}).get(f"{comp}_{mark}")
+    if isinstance(cp, str):
+        if cp.strip().lower() == "auto":
+            p["range"] = "auto"
+        else:
+            lo, hi, pw = cp.split("_")
+            p.update(range=[float(lo), float(hi)], pow=float(pw))
+    elif isinstance(cp, dict):
+        p.update(cp)
+    return json.dumps(p)
+
+
+CL = config["clustering"]
+GRID = [(int(i), int(j)) for i in CL["minpts"] for j in CL["minsamps"]]
+NCLUS = [int(n) for n in CL["number_of_clusters"]]
+DIFF, ENR = config["differential"], config["enrichment"]
+
+
+def _alt(vals):
+    vals = sorted(set(map(str, vals)), key=len, reverse=True)
+    return "|".join(map(re.escape, vals)) if vals else "(?!)"
+
+
+wildcard_constraints:
+    comparison=_alt(COMPS),
+    mark=_alt(MARKS),
+    condition=_alt(CONDS),
+    minpts=r"\d+",
+    minsamps=r"\d+",
+    n=r"\d+",
+
+
+CDIR = OUT + "/comparisons/{comparison}"
+PRE = CDIR + "/{comparison}_{mark}"
+KDIR = CDIR + "/clustering"
+
+
+# ------------------------------------------------------------------ targets
+def _per_comp_mark(comp, mark):
+    pre = f"{OUT}/comparisons/{comp}/{comp}_{mark}"
+    kdir = f"{OUT}/comparisons/{comp}/clustering"
+    out = [f"{pre}.scatterplot.{f}" for f in FORMATS]
+    out += [f"{OUT}/comparisons/{comp}/legend.png", f"{pre}.genic.vs.intergenic.png"]
+    for i, j in GRID:
+        out.append(f"{kdir}/clus.{comp}_{mark}_clustered.{i}.{j}.txt")
+        for n in NCLUS:
+            out += [f"{kdir}/{comp}_{mark}_{n}clusters.{i}.{j}.plots_density_scatterplot.{f}" for f in FORMATS]
+    d = COMPS[comp]
+    if DIFF["enabled"] and len(ROWS_ALL[(d["treatment"], mark)]) == 2 and len(ROWS_ALL[(d["control"], mark)]) == 2:
+        out.append(f"{OUT}/comparisons/{comp}/differential/{comp}_{mark}.stats_for_all_bins_no_clustering.csv")
+    if ENR["enabled"]:
+        if not ENR.get("db_dir"):
+            raise ValueError("enrichment.enabled needs enrichment.db_dir (LOLA region DB folder)")
+        out += enrichment_csvs(comp, mark)
+    return out
+
+
+def enrichment_csvs(comp, mark):
+    n = int(ENR["clusters"]["number_of_clusters"])
+    return [f"{OUT}/comparisons/{comp}/enrichment/{comp}_{mark}.cluster{chr(65 + k)}.{reg}.csv"
+            for k in range(n) for reg in ENR["regions"]]
+
+
+def exploratory_targets():
+    out = []
+    for mark in MARKS:
+        if sum(len(v) for (c, m), v in ROWS_ALL.items() if m == mark) < 2:
+            continue
+        if config["pca"]["enabled"]:
+            out += [f"{OUT}/exploratory/{mark}_PCA_plot.{f}" for f in FORMATS]
+        if config["correlation"]["enabled"]:
+            out += [f"{OUT}/exploratory/{mark}_correlation_plot.{f}" for f in FORMATS]
+    return out
+
+
+ALL = [binned(s) for s in BAM_SAMPLES + BED_SAMPLES]
+if FILT:
+    ALL += [f"{OUT}/bam2bed/{s}.binned_filt.bed" for s in CHIP_SAMPLES if KIND[s] != "bigwig"]
+ALL += [final_bw(c, m) for c, m in ROWS]
+ALL += [x for comp, mark in COMP_MARKS for x in _per_comp_mark(comp, mark)]
+ALL += exploratory_targets()
+
+
+rule all:
+    input:
+        ALL,
+
+
+# ------------------------------------------------------------------ binning (bedtools, as before)
+rule binning_windows:
+    output:
+        f"{WORK}/binning_windows.bed",
+    params:
+        windows=REF.get("binning_windows") or "",
+        chrom_sizes=CHROM_SIZES,
+        bin_size=REF.get("bin_size", 10000),
+    container: config["containers"]["bedtools"]
+    shell:
+        """
+        if [ -n "{params.windows}" ]; then zcat -f {params.windows} | cut -f1-3
+        else bedtools makewindows -g {params.chrom_sizes} -w {params.bin_size}
+        fi | LC_ALL=C sort -k1,1 -k2,2n > {output}
+        """
+
+
+rule bam2bed:
+    input:
+        bam=lambda wc: SRC[wc.sample],
+        windows=rules.binning_windows.output,
+    output:
+        bed=f"{OUT}/bam2bed/{{sample}}.bed" if config["binning"]["keep_read_bed"] else temp(f"{OUT}/bam2bed/{{sample}}.bed"),
+        binned_bed=f"{OUT}/bam2bed/{{sample}}.binned.bed",
+    wildcard_constraints:
+        sample=_alt(BAM_SAMPLES),
+    params:
+        sort_mem=config["binning"]["sort_mem"],
+    resources:
+        mem_mb=res("bam2bed", "mem_mb"),
+    threads: res("bam2bed", "threads", 1)
+    container: config["containers"]["bedtools"]
+    shell:
+        """
+        bedtools bamtobed -i {input.bam} | LC_ALL=C sort -k1,1 -k2,2n -S {params.sort_mem} --parallel {threads} \
+            -T $(dirname {output.bed}) > {output.bed}
+        bedtools intersect -a {input.windows} -b {output.bed} -sorted -c -nonamecheck > {output.binned_bed}
+        """
+
+
+rule binned_bed_input:
+    # samplesheet cell that is already a binned-count BED (port extension)
+    input:
+        lambda wc: SRC[wc.sample],
+    output:
+        f"{OUT}/bam2bed/{{sample}}.binned.bed",
+    wildcard_constraints:
+        sample=_alt(BED_SAMPLES),
+    container: config["containers"]["chipbinner"]
+    shell:
+        "{STEPS} binned-input --bed {input} --out {output}"
+
+
+if FILT:
+
+    rule filter_low_counts:
+        input:
+            binned_bed=f"{OUT}/bam2bed/{{sample}}.binned.bed",
+        output:
+            filtered_bed=f"{OUT}/bam2bed/{{sample}}.binned_filt.bed",
+        wildcard_constraints:
+            sample=_alt(BAM_SAMPLES + BED_SAMPLES),
+        params:
+            cutoff=G["filter_low_counts"],
+            blacklist=BLACKLIST,
+        resources:
+            mem_mb=res("filter_low_counts", "mem_mb"),
+        container: config["containers"]["chipbinner"]
+        shell:
+            "{STEPS} filter-low-counts --binned {input.binned_bed} --blacklist {params.blacklist} "
+            "--cutoff {params.cutoff} --out {output.filtered_bed}"
+
+
+# ------------------------------------------------------------------ normalised bigWigs
+rule bed2bw:
+    input:
+        binned_bed=lambda wc: f"{OUT}/bam2bed/{wc.sample}.binned{SUF}.bed",
+        input_bed=lambda wc: [binned(INPUT_OF[wc.sample])] if wc.sample in INPUT_OF else [],
+    output:
+        bw=f"{OUT}/{BWF}/{{sample}}.binned{SUF}.bw",
+    wildcard_constraints:
+        sample=_alt(s for s in CHIP_SAMPLES if KIND[s] != "bigwig"),
+    params:
+        MS_factor=lambda wc: MS_COEF[wc.sample] if MS else 1,
+        input_arg=lambda wc, input: f"--input {input.input_bed[0]}" if input.input_bed else "",
+        chrom_sizes=CHROM_SIZES,
+        blacklist=BLACKLIST,
+        norm=config["norm"],
+    resources:
+        mem_mb=res("bed2bw", "mem_mb"),
+    container: config["containers"]["chipbinner"]
+    shell:
+        """
+        {STEPS} norm-bw --binned {input.binned_bed} {params.input_arg} --chrom-sizes {params.chrom_sizes} \
+            --blacklist {params.blacklist} --depth-norm {params.norm[depth_norm]} \
+            --pseudocount {params.norm[pseudocount]} --raw-count-cutoff {params.norm[raw_count_cutoff]} \
+            --scaling-factor {params.MS_factor} --out {output.bw}
+        echo "for {wildcards.sample} used {params.MS_factor} as MS coefficient"
+        """
+
+
+rule bigwig_input:
+    # samplesheet cell that is already a normalised bigWig: used as is (port extension)
+    input:
+        lambda wc: SRC[wc.sample],
+    output:
+        f"{OUT}/{BWF}/{{sample}}.binned.bw",
+    wildcard_constraints:
+        sample=_alt(s for s in CHIP_SAMPLES if KIND[s] == "bigwig"),
+    container: config["containers"]["chipbinner"]
+    shell:
+        "cp {input} {output}"
+
+
+if MERGE:
+
+    rule merged_bw_files:
+        # mean of Rep1 + Rep2 (merge_norm_bw); a row with only Rep1 is copied
+        input:
+            reps=lambda wc: [rep_bw(s) for s in ROWS[(wc.condition, wc.mark)]],
+        output:
+            bw_merged=f"{OUT}/{BWF}_final/{{condition}}.{{mark}}.bw",
+        params:
+            chrom_sizes=CHROM_SIZES,
+        resources:
+            mem_mb=res("merged_bw_files", "mem_mb"),
+        container: config["containers"]["chipbinner"]
+        shell:
+            "{STEPS} final-bw --reps {input.reps} --chrom-sizes {params.chrom_sizes} --out {output.bw_merged}"
+
+else:
+
+    rule notmerged_bw_files:
+        input:
+            rep=lambda wc: rep_bw(ROWS[(wc.condition, wc.mark)][0]),
+        output:
+            bw_merged=f"{OUT}/{BWF}_final/{{condition}}.{{mark}}.bw",
+        container: config["containers"]["chipbinner"]
+        shell:
+            """
+            cp {input.rep} {output.bw_merged}
+            echo "not merging for {input.rep}"
+            """
+
+
+# ------------------------------------------------------------------ comparisons
+def _t(wc):
+    return COMPS[wc.comparison]["treatment"]
+
+
+def _c(wc):
+    return COMPS[wc.comparison]["control"]
+
+
+rule compare:
+    # genic.intergenic.plot.R + compare.genic.vs.intergenic.py
+    input:
+        bw1=lambda wc: final_bw(_t(wc), wc.mark),
+        bw2=lambda wc: final_bw(_c(wc), wc.mark),
+    output:
+        scatterplots=expand(PRE + ".scatterplot.{fmt}", fmt=FORMATS, allow_missing=True),
+        plot_range=PRE + ".plot_range.yaml",
+        preclust_matrix=PRE + "_preclust_mat.csv",
+        pooled_bed=PRE + "_preclust_pooled.bed",
+        smooth_scatter=PRE + "_preclust_smoothScatter.jpeg",
+        genic_vs_intergenic=PRE + ".genic.vs.intergenic.png",
+    params:
+        treatment=_t,
+        parental=_c,
+        prefix=lambda wc: f"{OUT}/comparisons/{wc.comparison}/{wc.comparison}_{wc.mark}",
+        spec=lambda wc: plot_spec(wc.comparison, wc.mark),
+        genic_plot=json.dumps(config["genic_plot"]),
+        gene_bed=GENE_BED,
+        igr_bed=IGR_BED,
+        formats=" ".join(FORMATS),
+    resources:
+        mem_mb=res("compare", "mem_mb"),
+    container: config["containers"]["chipbinner"]
+    shell:
+        """
+        echo "{input.bw1} // {input.bw2}"
+        {STEPS} compare --treated {input.bw1} --control {input.bw2} --t-label {params.treatment} \
+            --c-label {params.parental} --mark {wildcards.mark} --gene-bed {params.gene_bed} \
+            --igr-bed {params.igr_bed} --plot-spec '{params.spec}' --genic-plot '{params.genic_plot}' \
+            --formats {params.formats} --prefix {params.prefix}
+        """
+
+
+rule legend:
+    output:
+        CDIR + "/legend.png",
+    container: config["containers"]["chipbinner"]
+    shell:
+        "{STEPS} legend --out {output}"
+
+
+rule clustering:
+    # clus.py, one job per (minpts, minsamps) of the grid
+    input:
+        preclust_matrix=PRE + "_preclust_mat.csv",
+    output:
+        cluster_info=KDIR + "/clus.{comparison}_{mark}_clustered.{minpts}.{minsamps}.txt",
+        cluster_png=KDIR + "/clus.{comparison}_{mark}_clustered.{minpts}.{minsamps}.png",
+    log:
+        KDIR + "/log.{comparison}_{mark}.{minpts}.{minsamps}.txt",
+    params:
+        treatment=_t,
+        parental=_c,
+        method=CL["cluster_selection_method"],
+    threads: res("clustering", "threads", 1)
+    resources:
+        mem_mb=res("clustering", "mem_mb"),
+    container: config["containers"]["chipbinner"]
+    shell:
+        """
+        {STEPS} clustering --matrix {input.preclust_matrix} --minpts {wildcards.minpts} \
+            --minsamps {wildcards.minsamps} --method {params.method} --cores {threads} \
+            --t-label {params.treatment} --c-label {params.parental} --labels-out {output.cluster_info} \
+            --png-out {output.cluster_png} --log {log}
+        """
+
+
+rule annotate_clusters:
+    # annotate.clusters.R (BED instead of .rda; empty when HDBSCAN found fewer than n clusters)
+    input:
+        preclust_matrix=PRE + "_preclust_mat.csv",
+        pooled_bed=PRE + "_preclust_pooled.bed",
+        cluster_info=KDIR + "/clus.{comparison}_{mark}_clustered.{minpts}.{minsamps}.txt",
+    output:
+        KDIR + "/{comparison}_{mark}.{n}clusters.{minpts}.{minsamps}.annotated_clusters.bed",
+    resources:
+        mem_mb=res("annotate_clusters", "mem_mb"),
+    container: config["containers"]["chipbinner"]
+    shell:
+        """
+        {STEPS} annotate --matrix {input.preclust_matrix} --pooled {input.pooled_bed} \
+            --labels {input.cluster_info} --n {wildcards.n} --out {output}
+        """
+
+
+rule density_plot:
+    # density.scatter.plot.R (empty placeholders when there are no clusters, as before)
+    input:
+        bw1=lambda wc: final_bw(_t(wc), wc.mark),
+        bw2=lambda wc: final_bw(_c(wc), wc.mark),
+        plot_range=PRE + ".plot_range.yaml",
+        annotated=KDIR + "/{comparison}_{mark}.{n}clusters.{minpts}.{minsamps}.annotated_clusters.bed",
+    output:
+        density_scatter=expand(KDIR + "/{comparison}_{mark}_{n}clusters.{minpts}.{minsamps}.plots_density_scatterplot.{fmt}",
+                               fmt=FORMATS, allow_missing=True),
+    params:
+        treatment=_t,
+        parental=_c,
+        prefix=lambda wc: (f"{OUT}/comparisons/{wc.comparison}/clustering/{wc.comparison}_{wc.mark}_{wc.n}clusters."
+                           f"{wc.minpts}.{wc.minsamps}.plots_density_scatterplot"),
+        density_plot=json.dumps(config["density_plot"]),
+        gene_bed=GENE_BED,
+        igr_bed=IGR_BED,
+        formats=" ".join(FORMATS),
+    resources:
+        mem_mb=res("density_plot", "mem_mb"),
+    container: config["containers"]["chipbinner"]
+    shell:
+        """
+        {STEPS} density --treated {input.bw1} --control {input.bw2} --clusters {input.annotated} \
+            --n {wildcards.n} --range-yaml {input.plot_range} --t-label {params.treatment} \
+            --c-label {params.parental} --mark {wildcards.mark} --gene-bed {params.gene_bed} \
+            --igr-bed {params.igr_bed} --density-plot '{params.density_plot}' --formats {params.formats} \
+            --prefix {params.prefix}
+        """
+
+
+# ------------------------------------------------------------------ ChIPbinner extras
+def _mark_bws(wc):
+    return [rep_bw(s) for (c, m), reps in ROWS_ALL.items() if m == wc.mark for s in reps]
+
+
+def _mark_labels(wc):
+    return " ".join(f"{c}_{s}" for (c, m), reps in ROWS_ALL.items() if m == wc.mark for s in reps)
+
+
+def _mark_conds(wc):
+    return " ".join(c for (c, m), reps in ROWS_ALL.items() if m == wc.mark for s in reps)
+
+
+rule pca:
+    # ChIPbinner::plot_PCA on every replicate bigWig of a mark (snakemake_chipbinner: PCA.R, unwired)
+    input:
+        bws=_mark_bws,
+    output:
+        expand(OUT + "/exploratory/{mark}_PCA_plot.{fmt}", fmt=FORMATS, allow_missing=True),
+    params:
+        labels=_mark_labels,
+        conds=_mark_conds,
+        prefix=lambda wc: f"{OUT}/exploratory/{wc.mark}_PCA_plot",
+        formats=" ".join(FORMATS),
+    resources:
+        mem_mb=res("pca", "mem_mb"),
+    container: config["containers"]["chipbinner"]
+    shell:
+        "{STEPS} pca --bws {input.bws} --labels {params.labels} --conditions {params.conds} --mark {wildcards.mark} "
+        "--formats {params.formats} --prefix {params.prefix}"
+
+
+rule correlation:
+    # ChIPbinner::plot_correlation
+    input:
+        bws=_mark_bws,
+    output:
+        expand(OUT + "/exploratory/{mark}_correlation_plot.{fmt}", fmt=FORMATS, allow_missing=True),
+    params:
+        labels=_mark_labels,
+        conds=_mark_conds,
+        method=config["correlation"]["method"],
+        prefix=lambda wc: f"{OUT}/exploratory/{wc.mark}_correlation_plot",
+        formats=" ".join(FORMATS),
+    resources:
+        mem_mb=res("correlation", "mem_mb"),
+    container: config["containers"]["chipbinner"]
+    shell:
+        "{STEPS} correlation --bws {input.bws} --labels {params.labels} --conditions {params.conds} "
+        "--method {params.method} --mark {wildcards.mark} --formats {params.formats} --prefix {params.prefix}"
+
+
+def _sel(cfg):
+    s = cfg["clusters"]
+    return (KDIR + f"/{{comparison}}_{{mark}}.{s['number_of_clusters']}clusters.{s['minpts']}.{s['minsamps']}"
+            ".annotated_clusters.bed")
+
+
+rule differential:
+    # ChIPbinner::differentialBinAnalysis (ROTS); needs Rep1 + Rep2 in both conditions
+    input:
+        treated=lambda wc: [rep_bw(s) for s in ROWS_ALL[(_t(wc), wc.mark)]],
+        control=lambda wc: [rep_bw(s) for s in ROWS_ALL[(_c(wc), wc.mark)]],
+        clusters=_sel(DIFF),
+    output:
+        CDIR + "/differential/{comparison}_{mark}.stats_for_all_bins_no_clustering.csv",
+        CDIR + "/differential/{comparison}_{mark}.stats_per_cluster.csv",
+        CDIR + "/differential/{comparison}_{mark}.ROTS_output_summary.txt",
+    params:
+        treatment=_t,
+        parental=_c,
+        blacklist=BLACKLIST,
+        bootstrap=DIFF["bootstrap"],
+        K=DIFF["K"],
+        prefix=lambda wc: f"{OUT}/comparisons/{wc.comparison}/differential/{wc.comparison}_{wc.mark}",
+    resources:
+        mem_mb=res("differential", "mem_mb"),
+    container: config["containers"]["chipbinner"]
+    shell:
+        """
+        {STEPS} differential --treated {input.treated} --control {input.control} --t-label {params.treatment} \
+            --c-label {params.parental} --blacklist {params.blacklist} --clusters {input.clusters} \
+            --bootstrap {params.bootstrap} --K {params.K} --prefix {params.prefix}
+        """
+
+
+rule enrichment:
+    # ChIPbinner::enrich_clust (LOLA); lollipop plots are written next to non-empty CSVs
+    input:
+        clusters=_sel(ENR),
+        pooled_bed=PRE + "_preclust_pooled.bed",
+    output:
+        [CDIR + f"/enrichment/{{comparison}}_{{mark}}.cluster{chr(65 + k)}.{reg}.csv"
+         for k in range(int(ENR["clusters"]["number_of_clusters"])) for reg in ENR["regions"]],
+    params:
+        db_dir=ENR.get("db_dir") or "",
+        n=ENR["clusters"]["number_of_clusters"],
+        regions=" ".join(ENR["regions"]),
+        n_elements=ENR["n_elements"],
+        cutoff=ENR["cutoff_for_overlap"],
+        gene_bed=GENE_BED,
+        igr_bed=IGR_BED,
+        prefix=lambda wc: f"{OUT}/comparisons/{wc.comparison}/enrichment/{wc.comparison}_{wc.mark}",
+        formats=" ".join(FORMATS),
+    resources:
+        mem_mb=res("enrichment", "mem_mb"),
+    container: config["containers"]["chipbinner"]
+    shell:
+        """
+        {STEPS} enrichment --clusters {input.clusters} --pooled {input.pooled_bed} --db-dir {params.db_dir} \
+            --n {params.n} --regions {params.regions} --n-elements {params.n_elements} \
+            --cutoff-for-overlap {params.cutoff} --gene-bed {params.gene_bed} --igr-bed {params.igr_bed} \
+            --formats {params.formats} --prefix {params.prefix}
+        """

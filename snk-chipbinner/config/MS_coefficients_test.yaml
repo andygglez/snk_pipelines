@@ -1,0 +1,5 @@
+# Test MS coefficients (synthetic BAMs)
+WT_rep1_H3K36me2: 1.0
+WT_rep2_H3K36me2: 1.05
+KO_rep1_H3K36me2: 0.95
+KO_rep2_H3K36me2: 1.0
