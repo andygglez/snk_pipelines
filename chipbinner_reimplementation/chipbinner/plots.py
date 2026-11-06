@@ -98,11 +98,15 @@ def resolve_range(spec):
     return (lo, hi, lo, hi)
 
 
-def auto_range(pair, xbins=150, quantiles=(0.001, 0.999), min_count=10, square=True):
-    """Automatic plot range from the data: the extent of hexes holding > min_count bins
-    (ChIPbinner's default for min_x/min_y), on the 0.1-99.9 % trimmed bins.
-    square=True uses the union for both axes (so the y = x diagonal is at 45 degrees).
-    Returns [min_x, max_x, min_y, max_y] before the 5 % expansion."""
+def auto_range(pair, xbins=150, quantiles=(0.001, 0.999), min_count=10, square=False):
+    """Automatic plot range, as ChIPbinner::genic_intergenic_scatterplot decides it.
+
+    R: bins trimmed to the 0.1-99.9 % quantiles of x and y, hexbin(x, y, xbins = hexbins),
+    then min_x = min(hex x centre with count > 10) and min_y likewise, each axis on its
+    own; max_x / max_y are user inputs in R, so the automatic max applies the same rule
+    (max hex centre with count > 10). Pass the plot's own ``hexbins`` as ``xbins``.
+    square=True (not ChIPbinner) would force one shared range on both axes.
+    Returns [min_x, max_x, min_y, max_y] before ChIPbinner's 5 % expand_range."""
     pdat = quantile_filter(pair, *quantiles)
     cells, _ = hexbin(pdat["x"].to_numpy(), pdat["y"].to_numpy(), xbins=xbins)
     dense = cells[cells["count"] > min_count]
@@ -306,9 +310,7 @@ def genic_intergenic_scatterplot(treated_samp_norm_bw, wildtype_samp_norm_bw, ge
 
     bg = np.array([255.0, 255, 255])
     p = _Panels(1, panel=panel_size, mt=92)
-    lay = _base_layout(p, title_of_plot or f"{yl} vs {xl}",
-                       f"{len(pdat):,} bins · {(pdat['r'] == 1).mean():.0%} genic-only, "
-                       f"{(pdat['r'] == -1).mean():.0%} intergenic-only", font_size)
+    lay = _base_layout(p, title_of_plot or f"{yl} vs {xl}", None, font_size)
     lay.xaxis = _axis(p.dom_x(0), "y", lim[0], f"{xl} {ARROW}", show_scales, "black", axis_title_size, tick_font_size)
     lay.yaxis = _axis([0, 1], "x", lim[1], f"{yl} {ARROW}", show_scales, "black", axis_title_size, tick_font_size)
     fig = go.Figure(layout=lay)
@@ -370,9 +372,7 @@ def density_based_scatterplot(treated_samp_norm_bw, wildtype_samp_norm_bw, annot
     kinds = (["density"] if include_additional_density_plot else []) + ["genic", "clusters"]
     p = _Panels(len(kinds), panel=panel_size)
     n_clu = pdat["cluster"].notna().sum()
-    lay = _base_layout(p, title_of_plot or f"{yl} vs {xl}",
-                       f"{yl} (y) vs {xl} (x) · {len(pdat):,} bins · {n_clu:,} in clusters "
-                       + " · ".join(f"{k}: {(pdat['cluster'] == k).sum():,}" for k in letters), font_size)
+    lay = _base_layout(p, title_of_plot or f"{yl} vs {xl}", None, font_size)
     fig = go.Figure(layout=lay)
     black = np.array([0.0, 0, 0])
     strip_titles = {"density": title_of_plot or "Bin density", "genic": "Intergenic vs genic ratio",

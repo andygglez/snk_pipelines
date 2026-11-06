@@ -34,7 +34,7 @@ chipbinner:
     pseudocount: 1.0e-15
 
   # One entry per comparison; x axis = control, y axis = treatment.
-  # range: auto            -> found from the data (extent of hexes with > 10 bins, same for x and y)
+  # range: auto            -> as ChIPbinner: per axis, extent of the hex centres holding > 10 bins
   #        [min, max]      -> both axes
   #        {x: [min, max], y: [min, max]}   (either may be auto)
   # The range actually used is written to comparisons/<T>_<C>/<T>_<C>_<mark>.plot_range.yaml.
@@ -50,7 +50,6 @@ chipbinner:
   plot_defaults:
     range: auto
     pow: 0.75
-    square_auto_range: true           # auto range: same limits on x and y
 
   genic_plot:
     hexbins: 150

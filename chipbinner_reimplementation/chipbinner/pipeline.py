@@ -52,7 +52,7 @@ DEFAULTS = {
     "merge_replicates": True,
     "norm": {"use_input": False, "depth_norm": True, "raw_count_cutoff": 100, "pseudocount": 1e-15},
     "comparisons": [],
-    "plot_defaults": {"range": "auto", "pow": 0.75, "square_auto_range": True},
+    "plot_defaults": {"range": "auto", "pow": 0.75},
     "genic_plot": {"hexbins": 150, "show_legend": True, "legend_pos": "right", "show_scales": True},
     "density_plot": {"hexbins": 150, "show_scales": True, "include_additional_density_plot": True,
                      "filter_extreme_bins": True, "cluster_colors": "bright"},
@@ -274,14 +274,14 @@ class Workflow:
             return
         # ---- plot range: auto-detected or from config; recorded next to the plots
         if isinstance(pp["range"], str) and pp["range"].lower() == "auto":
-            rng = plots.auto_range(pair, square=bool(pp.get("square_auto_range", True)))
+            rng = plots.auto_range(pair, xbins=int(self.cfg["genic_plot"]["hexbins"]))
             src = "auto"
         else:
             r = plots.resolve_range(pp["range"])
             rng, src = list(r), "config"
             auto = None
             if any(v is None for v in rng):  # partially automatic ({x: auto, y: [..]})
-                auto = plots.auto_range(pair, square=False)
+                auto = plots.auto_range(pair, xbins=int(self.cfg["genic_plot"]["hexbins"]))
                 rng = [a if v is None else v for v, a in zip(rng, auto)]
         with open(f"{pre}.plot_range.yaml", "w") as fh:
             yaml.safe_dump({"comparison": name, "mark": mark, "source": src, "pow": float(pp["pow"]),

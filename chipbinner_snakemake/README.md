@@ -27,8 +27,8 @@ apptainer pull containers/depot.galaxyproject.org-singularity-bedtools-2.30.0--h
 | snakemake_chipbinner | here | output |
 |---|---|---|
 | `bam2bed` (bedtools) | `binning_windows`, `bam2bed` (bedtools) | `outdir/bam2bed/<sample>.{bed,binned.bed}` |
-| `filter_low_counts` | same | `outdir/bam2bed/<sample>.binned_filt.bed` |
-| `bed2bw` | same | `outdir/{MS,notMS}bigwigs/<sample>.binned[_filt].bw` |
+| `filter_low_counts` | removed (no low-count filtering option) | — |
+| `bed2bw` | same | `outdir/{MS,notMS}bigwigs/<sample>.binned.bw` |
 | `merged_bw_files` / `notmerged_bw_files` | same | `outdir/{MS,notMS}bigwigs_final/<condition>.<mark>.bw` |
 | `compare` | `compare`, `legend` | `comparisons/<T>_<C>/<T>_<C>_<mark>.scatterplot.{pdf,html}`, `_preclust_{mat.csv,pooled.bed,smoothScatter.jpeg}`, `.genic.vs.intergenic.png`, `.plot_range.yaml`, `legend.png` |
 | `clustering` (clus.py loop + annotate.clusters.R) | `clustering` (one job per minpts × minsamps), `annotate_clusters` | `clustering/clus.<T>_<C>_<mark>_clustered.<i>.<j>.{txt,png}`, `<T>_<C>_<mark>.<n>clusters.<i>.<j>.annotated_clusters.bed` |
@@ -38,7 +38,17 @@ apptainer pull containers/depot.galaxyproject.org-singularity-bedtools-2.30.0--h
 
 ## Plot ranges
 
-`comparison_parameters` keeps the old `"<min>_<max>_<pow>"` strings, keyed `<T>_<C>_<mark>`. Each entry can also be `auto` or `{range: auto | [min, max] | {x: [..], y: auto}, pow: …}`. A comparison without an entry uses `plot_defaults`, or the `range`/`pow` set on the comparison entry, which is `auto` by default. Auto uses the extent of the hexes holding more than 10 bins. The R script instead used the min/max of all scores and wrote them back into `config.yaml`. Here the range actually used is written to `<T>_<C>_<mark>.plot_range.yaml`; the density plots read the same file, so both plots share one range.
+`comparison_parameters` keeps the old `"<min>_<max>_<pow>"` strings, keyed `<T>_<C>_<mark>`. As in snakemake_chipbinner, min/max apply to both axes. Each entry can also be `auto` or `{range: auto | [min, max] | {x: [..], y: auto}, pow: …}`. A comparison without an entry uses `plot_defaults`, or the `range`/`pow` set on the comparison entry, which is `auto` by default.
+
+`auto` decides the limits the way `ChIPbinner::genic_intergenic_scatterplot` does:
+1. **Trim:** keep the bins scored in both samples, trimmed to the 0.1–99.9 % quantiles of x and y.
+2. **Hex grid:** run `hexbin(x, y, xbins = genic_plot.hexbins)`.
+3. **Per axis:** each axis runs from the lowest to the highest hex centre holding more than 10 bins. ChIPbinner applies this rule to `min_x`/`min_y` only; it has no default for `max_x`/`max_y` (they are required arguments), so the port uses the same rule for the maximum.
+4. **Margin:** each axis gets ChIPbinner's 5 % `expand_range` on both sides.
+
+x and y are set independently, as in R. The values used (before the 5 % margin) go to `<T>_<C>_<mark>.plot_range.yaml`. The density plots read that file, just as snakemake_chipbinner passed the same min/max to `density_based_scatterplot`, whose limits have no automatic default.
+
+Plots carry only their title; there is no "N bins …" subtitle.
 
 ## Deliberate changes from snakemake_chipbinner
 
@@ -51,7 +61,7 @@ apptainer pull containers/depot.galaxyproject.org-singularity-bedtools-2.30.0--h
 
 ## Test
 
-`config/test.yaml` runs every rule, including MS normalisation, filtering, merging, both range styles, differential and enrichment. It uses synthetic BAMs (hg38 chr21 + chr22, made by `tools/make_synthetic_bams.py`) and ChIPbinner's downsampled region DB, both placed under `test_data/` (not in git):
+`config/test.yaml` runs every rule, including MS normalisation, merging, both range styles, differential and enrichment. It uses synthetic BAMs (hg38 chr21 + chr22, made by `tools/make_synthetic_bams.py`) and ChIPbinner's downsampled region DB, both placed under `test_data/` (not in git):
 
 ```bash
 snakemake --cores 2 --configfile config/test.yaml --software-deployment-method apptainer   # -> results_test/outdir

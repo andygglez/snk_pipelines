@@ -6,7 +6,6 @@ general:
   organism: hg38
   MS_normalize: true
   merge_replicates: true
-  filter_low_counts: 5
   use_input: false
 inputs:
   sample_folder: test_data/synthetic

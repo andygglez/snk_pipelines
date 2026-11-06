@@ -2,7 +2,7 @@
 # (scripts/chipbinner/, a reimplementation of padilr1/ChIPbinner; see ../chipbinner_reimplementation).
 #
 # Same rules, config sections and outdir/ tree as snakemake_chipbinner:
-#   bam2bed -> [filter_low_counts] -> bed2bw -> merged_bw_files | notmerged_bw_files
+#   bam2bed -> bed2bw -> merged_bw_files | notmerged_bw_files
 #   -> compare -> clustering -> annotate_clusters -> density_plot
 # plus ChIPbinner functions snakemake_chipbinner never wired in (each off/on in config.yaml):
 #   PCA / correlation (exploratory/), differential (ROTS), enrichment (LOLA).
@@ -20,6 +20,8 @@
 #     comparison names may contain "_" in condition names (split on known conditions).
 #   * Plots are written in every `formats` entry (pdf + interactive html by default).
 #   * legend.png is its own rule (one per comparison, as several marks share the folder).
+#   * No filter_low_counts step/option (removed on purpose): bed2bw always reads the
+#     raw .binned.bed, and bigWigs are always <sample>.binned.bw.
 #   * Outputs are tracked by Snakemake, so there is no need to delete outdir/ before a rerun.
 import json
 import os
@@ -51,8 +53,6 @@ CHROM_SIZES = _ref("chrom_sizes", ".chrom.sizes")
 
 MS = bool(G["MS_normalize"])
 BWF = "MSbigwigs" if MS else "notMSbigwigs"
-FILT = G.get("filter_low_counts") not in (False, None, "", 0, "no")
-SUF = "_filt" if FILT else ""
 MERGE = bool(G["merge_replicates"])
 USE_INPUT = bool(G.get("use_input"))
 
@@ -138,7 +138,7 @@ def binned(s):
 
 
 def rep_bw(s):
-    return f"{OUT}/{BWF}/{s}.binned.bw" if KIND[s] == "bigwig" else f"{OUT}/{BWF}/{s}.binned{SUF}.bw"
+    return f"{OUT}/{BWF}/{s}.binned.bw"
 
 
 def final_bw(cond, mark):
@@ -257,8 +257,6 @@ def exploratory_targets():
 
 
 ALL = [binned(s) for s in BAM_SAMPLES + BED_SAMPLES]
-if FILT:
-    ALL += [f"{OUT}/bam2bed/{s}.binned_filt.bed" for s in CHIP_SAMPLES if KIND[s] != "bigwig"]
 ALL += [final_bw(c, m) for c, m in ROWS]
 ALL += [x for comp, mark in COMP_MARKS for x in _per_comp_mark(comp, mark)]
 ALL += exploratory_targets()
@@ -320,33 +318,13 @@ rule binned_bed_input:
         "{STEPS} binned-input --bed {input} --out {output}"
 
 
-if FILT:
-
-    rule filter_low_counts:
-        input:
-            binned_bed=f"{OUT}/bam2bed/{{sample}}.binned.bed",
-        output:
-            filtered_bed=f"{OUT}/bam2bed/{{sample}}.binned_filt.bed",
-        wildcard_constraints:
-            sample=_alt(BAM_SAMPLES + BED_SAMPLES),
-        params:
-            cutoff=G["filter_low_counts"],
-            blacklist=BLACKLIST,
-        resources:
-            mem_mb=res("filter_low_counts", "mem_mb"),
-        container: config["containers"]["chipbinner"]
-        shell:
-            "{STEPS} filter-low-counts --binned {input.binned_bed} --blacklist {params.blacklist} "
-            "--cutoff {params.cutoff} --out {output.filtered_bed}"
-
-
 # ------------------------------------------------------------------ normalised bigWigs
 rule bed2bw:
     input:
-        binned_bed=lambda wc: f"{OUT}/bam2bed/{wc.sample}.binned{SUF}.bed",
+        binned_bed=lambda wc: binned(wc.sample),
         input_bed=lambda wc: [binned(INPUT_OF[wc.sample])] if wc.sample in INPUT_OF else [],
     output:
-        bw=f"{OUT}/{BWF}/{{sample}}.binned{SUF}.bw",
+        bw=f"{OUT}/{BWF}/{{sample}}.binned.bw",
     wildcard_constraints:
         sample=_alt(s for s in CHIP_SAMPLES if KIND[s] != "bigwig"),
     params:

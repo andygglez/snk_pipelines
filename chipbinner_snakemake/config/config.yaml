@@ -8,7 +8,6 @@ general:
   organism: hg38                  # hg38 | mm10 -> shipped annotations/ (genic, intergenic, blacklist, chrom.sizes)
   MS_normalize: false             # true -> outdir/MSbigwigs*, scaling factor = MS coefficient (references.MS_yaml)
   merge_replicates: true          # Rep1 + Rep2 -> mean bigWig; false -> Rep1 only
-  filter_low_counts: false        # false, or a raw-count cutoff (ChIPbinner::filter_low_counts)
   use_input: false                # true: log2(ChIP/input) with the Input1/Input2 columns
 
 inputs:
@@ -41,12 +40,11 @@ comparisons:
 comparison_parameters: {}
 
 plot_defaults:
-  range: auto                     # extent of the hexes holding > 10 bins
+  range: auto                     # as ChIPbinner: per axis, extent of the hex centres holding > 10 bins
   pow: 0.75                       # snakemake_chipbinner's --pow
-  square_auto_range: true         # auto: same limits on x and y
 
 genic_plot:
-  hexbins: 150
+  hexbins: 150                    # also the hex grid the auto range is computed on
   show_legend: false              # snakemake_chipbinner: show_legend = FALSE (legend.png is separate)
   legend_pos: right
   show_scales: true

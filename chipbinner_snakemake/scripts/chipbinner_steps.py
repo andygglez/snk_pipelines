@@ -2,7 +2,7 @@
 """One subcommand per Snakefile rule, built on the Python ChIPbinner port (scripts/chipbinner/).
 
 The R scripts of andygglez/snakemake_chipbinner map to these subcommands:
-  filter.low.counts.R            -> filter-low-counts
+  filter.low.counts.R            -> (not ported: no low-count filtering option)
   chipbinner.norm.bw.R           -> norm-bw
   merge.replicates.R / cp        -> final-bw
   genic.intergenic.plot.R +
@@ -63,12 +63,6 @@ def cmd_binned_input(a):
     write_bed(df, a.out)
 
 
-def cmd_filter_low_counts(a):
-    res = normalize.filter_low_counts([a.binned], a.blacklist, float(a.cutoff))
-    write_bed(list(res.values())[0], a.out)
-    log.info("filter_low_counts %s: cutoff %s", a.binned, a.cutoff)
-
-
 def cmd_norm_bw(a):
     df = normalize.norm_bw(a.binned, a.chrom_sizes, a.blacklist, input_binned_file=a.input or None,
                            use_input=bool(a.input), depth_norm=_bool(a.depth_norm), pseudocount=float(a.pseudocount),
@@ -86,15 +80,17 @@ def cmd_final_bw(a):
 
 
 # --------------------------------------------------------------------------- per comparison
-def _range(pair, spec):
-    """Resolve the plot spec (auto / [min, max] / {x, y}) to [min_x, max_x, min_y, max_y]."""
+def _range(pair, spec, hexbins):
+    """Resolve the plot spec (auto / [min, max] / {x, y}) to [min_x, max_x, min_y, max_y].
+
+    auto follows ChIPbinner::genic_intergenic_scatterplot: per axis, the extent of the hex
+    centres holding > 10 bins on the scatterplot's own hex grid (plots.auto_range)."""
+    auto = plots.auto_range(pair, xbins=int(hexbins))
     if isinstance(spec["range"], str) and spec["range"].lower() == "auto":
-        return plots.auto_range(pair, square=_bool(spec.get("square_auto_range", True))), "auto"
+        return auto, "auto"
     rng = list(plots.resolve_range(spec["range"]))
-    if any(v is None for v in rng):  # {x: auto, y: [..]}
-        auto = plots.auto_range(pair, square=False)
-        rng = [b if v is None else v for v, b in zip(rng, auto)]
-    return rng, "config"
+    src = "config" if all(v is not None for v in rng) else "config+auto"  # {x: [..], y: auto}
+    return [a if v is None else v for v, a in zip(rng, auto)], src
 
 
 def cmd_compare(a):
@@ -103,7 +99,7 @@ def cmd_compare(a):
     pair = cluster.load_pair(a.treated, a.control)
     if len(pair) < 10:
         raise SystemExit(f"{a.prefix}: only {len(pair)} bins scored in both samples")
-    rng, src = _range(pair, spec)
+    rng, src = _range(pair, spec, g["hexbins"])
     with open(f"{a.prefix}.plot_range.yaml", "w") as fh:
         yaml.safe_dump({"comparison": f"{a.t_label}_{a.c_label}", "mark": a.mark, "source": src,
                         "pow": float(spec["pow"]), "x": [round(rng[0], 4), round(rng[1], 4)],
@@ -252,12 +248,6 @@ def main():
     p.add_argument("--bed", required=True)
     p.add_argument("--out", required=True)
 
-    p = sp("filter-low-counts", cmd_filter_low_counts)
-    p.add_argument("--binned", required=True)
-    p.add_argument("--blacklist", required=True)
-    p.add_argument("--cutoff", required=True)
-    p.add_argument("--out", required=True)
-
     p = sp("norm-bw", cmd_norm_bw)
     p.add_argument("--binned", required=True)
     p.add_argument("--input", default="")
@@ -291,7 +281,7 @@ def main():
         return p
 
     p = sp2("compare", cmd_compare)
-    p.add_argument("--plot-spec", required=True, help="JSON {range, pow, square_auto_range}")
+    p.add_argument("--plot-spec", required=True, help="JSON {range, pow}")
     p.add_argument("--genic-plot", required=True, help="JSON genic_plot config")
 
     p = sp("legend", cmd_legend)
