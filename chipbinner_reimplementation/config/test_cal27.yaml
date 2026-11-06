@@ -1,0 +1,13 @@
+# Real data: ChIPbinner's Cal27 H3K36me2 normalised bigWigs (NSD1-KO vs WT), from the bigWig stage on.
+chipbinner:
+  outdir: results_test_cal27/outdir
+  samplesheet: config/chipbinner_samples_cal27.csv
+  sample_folder: example_data
+  merge_replicates: false
+  comparisons:
+    - {treatment: NSD1_KO, control: WT, range: auto, pow: 1.1}
+  density_plot: {hexbins: 50}
+  clustering: {minpts: [100], minsamps: [100], number_of_clusters: [2, 3]}
+  formats: [pdf, html, png]
+  enrichment: {enabled: true, db_dir: example_data/regionDB_hg38_downsampled, regions: [genome_wide],
+               clusters: {minpts: 100, minsamps: 100, number_of_clusters: 3}}

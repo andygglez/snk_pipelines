@@ -1,0 +1,17 @@
+# End-to-end test on the SYNTHETIC BAMs (tools/make_synthetic_bams.py): every workflow step.
+chipbinner:
+  outdir: results_test_synthetic/outdir
+  samplesheet: config/chipbinner_samples.csv
+  sample_folder: example_data/synthetic
+  filter_low_counts: 5
+  MS_normalize: true
+  MS_coefficients: {WT_rep1_H3K36me2: 1.0, WT_rep2_H3K36me2: 1.05, KO_rep1_H3K36me2: 0.95, KO_rep2_H3K36me2: 1.0}
+  norm: {use_input: false, depth_norm: true, raw_count_cutoff: 0, pseudocount: 1.0e-3}
+  comparisons:
+    - {treatment: KO, control: WT, range: auto, pow: 0.75}
+    - {treatment: WT, control: KO, range: {x: [2.5, 7.5], y: auto}, overrides: {H3K36me2: {pow: 1.1}}}
+  clustering: {minpts: [100, 400], minsamps: [100, 400], number_of_clusters: [2, 3]}
+  formats: [pdf, html]
+  differential: {enabled: true, bootstrap: 100, K: 2000, clusters: {minpts: 100, minsamps: 100, number_of_clusters: 2}}
+  enrichment: {enabled: true, db_dir: example_data/regionDB_hg38_downsampled, regions: [genome_wide, genic, intergenic],
+               clusters: {minpts: 100, minsamps: 100, number_of_clusters: 2}}

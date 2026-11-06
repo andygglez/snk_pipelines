@@ -1,0 +1,91 @@
+# ChIPbinner (padilr1/ChIPbinner) Python port - workflow config.
+# This block is meant to become the `chipbinner:` section of snk-chipseq/config/config.yaml.
+# Defaults mirror andygglez/snakemake_chipbinner (norm_bw settings, pow 0.75, HDBSCAN grid,
+# 2 and 3 clusters, hexbins 150, density plot with the extra magma panel).
+chipbinner:
+  outdir: outdir                      # snakemake_chipbinner writes everything under outdir/
+  genome_assembly: hg38               # hg38 | mm10 -> annotations/ shipped with the port
+  annotations:                        # optional overrides (BED / chrom.sizes); empty = shipped files
+    gene_bed: ""
+    igr_bed: ""
+    blacklist: ""
+    chrom_sizes: ""
+
+  # Columns: Rep1,Rep2,Condition,Mark (snakemake_chipbinner sample_list.csv) + optional Input1,Input2.
+  # Rep/Input cells: BAM (binned here), binned-count BED (count in column 4) or an already
+  # normalised bigWig (used as is). Relative paths are looked up in sample_folder.
+  samplesheet: config/chipbinner_samples.csv
+  sample_folder: ""
+
+  binning:
+    bin_size: 10000                   # windows from chrom_sizes (bedtools makewindows -w)
+    windows: ""                       # or a windows BED (snakemake_chipbinner binning_windows)
+    keep_read_bed: false              # also write bam2bed/<sample>.bed (bamtobed reads; large)
+
+  filter_low_counts: false            # false, or a raw-count cutoff (ChIPbinner filter_low_counts)
+  MS_normalize: false                 # true -> MSbigwigs/, scaling_factor = MS coefficient
+  MS_coefficients: {}                 # {<Rep file without .bam>: factor}, or the path of such a YAML
+  merge_replicates: true              # Rep1 + Rep2 -> mean bigWig (merge_norm_bw)
+
+  norm:                               # ChIPbinner::norm_bw, as called by snakemake_chipbinner
+    use_input: false                  # true: log2(ChIP/input) with Input1/Input2
+    depth_norm: true
+    raw_count_cutoff: 100
+    pseudocount: 1.0e-15
+
+  # One entry per comparison; x axis = control, y axis = treatment.
+  # range: auto            -> found from the data (extent of hexes with > 10 bins, same for x and y)
+  #        [min, max]      -> both axes
+  #        {x: [min, max], y: [min, max]}   (either may be auto)
+  # The range actually used is written to comparisons/<T>_<C>/<T>_<C>_<mark>.plot_range.yaml.
+  # Also accepted: "<treatment>_<control>" strings (snakemake_chipbinner style).
+  comparisons:
+    - treatment: NSD1_KO
+      control: WT
+      range: auto
+      pow: 0.75
+      marks: all                      # or a list of marks
+      overrides: {}                   # per mark, e.g. {H3K36me2: {range: [-5, 1], pow: 1.25}}
+
+  plot_defaults:
+    range: auto
+    pow: 0.75
+    square_auto_range: true           # auto range: same limits on x and y
+
+  genic_plot:
+    hexbins: 150
+    show_legend: true
+    legend_pos: right
+    show_scales: true
+
+  density_plot:
+    hexbins: 150
+    show_scales: true
+    include_additional_density_plot: true
+    filter_extreme_bins: true
+    cluster_colors: bright            # bright | alphabet (ChIPbinner's)
+
+  clustering:                         # HDBSCAN grid (snakemake_chipbinner: seq 100 300 1000)
+    minpts: [100, 400, 700, 1000]
+    minsamps: [100, 400, 700, 1000]
+    number_of_clusters: [2, 3]
+    cluster_selection_method: eom
+    cores: 1
+
+  formats: [pdf, html]                # static formats need kaleido + Chrome
+
+  # ChIPbinner functions not used by snakemake_chipbinner (outputs: exploratory/, differential/, enrichment/)
+  pca: {enabled: true}
+  correlation: {enabled: true, method: pearson}
+  differential:                       # differentialBinAnalysis (ROTS); needs Rep1 + Rep2 per condition
+    enabled: false
+    bootstrap: 1000
+    K: 5000
+    clusters: {minpts: 100, minsamps: 100, number_of_clusters: 3}
+  enrichment:                         # enrich_clust (LOLA); db_dir = LOLA regionDB/<genome> folder
+    enabled: false
+    db_dir: ""
+    regions: [genome_wide, genic, intergenic]
+    n_elements: 10
+    cutoff_for_overlap: 0
+    clusters: {minpts: 100, minsamps: 100, number_of_clusters: 3}
