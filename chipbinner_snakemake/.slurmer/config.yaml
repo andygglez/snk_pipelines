@@ -1,0 +1,21 @@
+project: chipbinner_snakemake                 # remote dir = <remote_root>/<project>
+host: rorqual                      # alias from ~/.ssh/config (ControlMaster)
+remote_root: /scratch/andygg98
+account: def-majewski
+mail: andy.garciagonzalez@mail.mcgill.ca
+mail_type: END,FAIL
+poll_interval: 180                 # seconds between status checks in `watch`
+setup: |                           # shell lines run before the command (module load, venv...)
+  module load apptainer
+  source /scratch/andygg98/claude_jobs/venv_snk/bin/activate
+  unset -f which 2>/dev/null || true
+  export MPLCONFIGDIR=/tmp/mplcfg
+limits:                            # hard caps for any profile/override
+  mem: 256G
+  time: "48:00:00"
+  cpus: 64
+  gpus: 4
+profiles:                          # no GPUs unless you add `gpus:` yourself
+  smoke: {time: "00:10:00", mem: 24G, cpus: 4}
+  full:  {time: "01:00:00", mem: 64G, cpus: 8}
+default_profile: smoke

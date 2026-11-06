@@ -1,0 +1,14 @@
+# rsync exclude patterns (one per line). .git/, .slurmer/ and /runs/ are always excluded.
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+.DS_Store
+# built/pulled on Rorqual, run state and outputs: never uploaded, never deleted remotely
+/containers/*.sif
+/containers/*.img
+/.snakemake/
+/results*/
+/outdir/
