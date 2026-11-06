@@ -295,16 +295,14 @@ rule bam2bed:
         binned_bed=f"{OUT}/bam2bed/{{sample}}.binned.bed",
     wildcard_constraints:
         sample=_alt(BAM_SAMPLES),
-    params:
-        sort_mem=config["binning"]["sort_mem"],
     resources:
         mem_mb=res("bam2bed", "mem_mb"),
-    threads: res("bam2bed", "threads", 1)
     container: config["containers"]["bedtools"]
     shell:
         """
-        bedtools bamtobed -i {input.bam} | LC_ALL=C sort -k1,1 -k2,2n -S {params.sort_mem} --parallel {threads} \
-            -T $(dirname {output.bed}) > {output.bed}
+        # plain sort as in snakemake_chipbinner: the bedtools biocontainer's sort is BusyBox, which
+        # rejects --parallel and ignores -S/-T, and sorts in memory (size mem_mb to the read count)
+        bedtools bamtobed -i {input.bam} | LC_ALL=C sort -k1,1 -k2,2n > {output.bed}
         bedtools intersect -a {input.windows} -b {output.bed} -sorted -c -nonamecheck > {output.binned_bed}
         """
 

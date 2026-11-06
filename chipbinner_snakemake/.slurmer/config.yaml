@@ -7,7 +7,7 @@ mail_type: END,FAIL
 poll_interval: 180                 # seconds between status checks in `watch`
 setup: |                           # shell lines run before the command (module load, venv...)
   module load apptainer
-  source /scratch/andygg98/claude_jobs/venv_snk/bin/activate
+  export PATH=$HOME/environments/snakemake/bin:$PATH   # user's conda env with snakemake
   unset -f which 2>/dev/null || true
   export MPLCONFIGDIR=/tmp/mplcfg
 limits:                            # hard caps for any profile/override

@@ -12,3 +12,9 @@ venv/
 /.snakemake/
 /results*/
 /outdir/
+# the user's own files in the remote dir
+/jobs.template
+/which.txt
+/error_*.log
+/output_*.log
+/.cache/

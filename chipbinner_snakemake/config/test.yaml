@@ -27,6 +27,6 @@ enrichment: {enabled: true, db_dir: test_data/regionDB_hg38_downsampled, regions
              clusters: {minpts: 100, minsamps: 100, number_of_clusters: 2}}
 resources:
   default: {mem_mb: 2000, threads: 1}
-  bam2bed: {mem_mb: 2000, threads: 1}
+  bam2bed: {mem_mb: 2000}
   clustering: {mem_mb: 4000, threads: 2}
-binning: {keep_read_bed: true, sort_mem: 500M}
+binning: {keep_read_bed: true}
