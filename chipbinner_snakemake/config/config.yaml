@@ -1,4 +1,4 @@
-# snk-chipbinner: andygglez/snakemake_chipbinner on the Python ChIPbinner port
+# chipbinner_snakemake: andygglez/snakemake_chipbinner on the Python ChIPbinner port
 # (padilr1/ChIPbinner reimplemented in scripts/chipbinner/; no pinned upstream release).
 # Sections general / inputs / references / comparisons / comparison_parameters are the ones
 # snakemake_chipbinner's genconfig.py writes; the rest are new options with its defaults.

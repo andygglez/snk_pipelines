@@ -1,17 +1,24 @@
-# snk-chipbinner
+# chipbinner_snakemake
 
 [andygglez/snakemake_chipbinner](https://github.com/andygglez/snakemake_chipbinner), rebuilt on the Python reimplementation of [padilr1/ChIPbinner](https://github.com/padilr1/ChIPbinner) (`scripts/chipbinner/`; development copy and validation in `../chipbinner_reimplementation/`). It keeps the old pipeline's rules, config sections and `outdir/` tree. The R scripts are replaced by `scripts/chipbinner_steps.py`, one subcommand per rule, and every step runs in a container.
 
 ## Running
 
+Standalone pipeline: it is deliberately not registered with the repo's `pipeline` command (the folder has no `snk-` prefix). Once it is validated it will be integrated downstream of snk-chipseq.
+
 ```bash
-cd snk-chipbinner
+cd chipbinner_snakemake
 # edit config/config.yaml (organism, comparisons, ...) and config/sample_list.csv
-pipeline run chipbinner -c my.yaml -t 8          # or:
 snakemake --cores 8 --software-deployment-method apptainer --apptainer-args "--bind <data_dir>"
 ```
 
-The `chipbinner` image is built once, on a node with internet: `apptainer build containers/chipbinner.sif containers/chipbinner.def`. `pipeline pull chipbinner` fetches the bedtools image.
+Build the images once, on a node with internet (the Rorqual login node):
+
+```bash
+apptainer build containers/chipbinner.sif containers/chipbinner.def
+apptainer pull containers/depot.galaxyproject.org-singularity-bedtools-2.30.0--hc088bd4_0.img \
+    https://depot.galaxyproject.org/singularity/bedtools:2.30.0--hc088bd4_0
+```
 
 `config/sample_list.csv` keeps the old columns, `Rep1,Rep2,Condition,Mark`, and accepts optional `Input1,Input2` (used with `general.use_input`). Each cell is a BAM, as before, a binned-count BED, or an already normalised bigWig. Relative cells are looked up in `inputs.sample_folder`. MS coefficients (`references.MS_yaml`) are keyed by the file name without `.bam`, as before.
 

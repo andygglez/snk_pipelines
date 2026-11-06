@@ -1,4 +1,4 @@
-# Singularity/Apptainer image per tool (paths relative to snk-chipbinner/). Repoint images here only.
+# Singularity/Apptainer image per tool (paths relative to chipbinner_snakemake/). Repoint images here only.
 containers:
   # bam2bed / binning_windows (snakemake_chipbinner called bedtools directly too)
   bedtools: containers/depot.galaxyproject.org-singularity-bedtools-2.30.0--hc088bd4_0.img
@@ -7,6 +7,6 @@ containers:
   #   apptainer build containers/chipbinner.sif containers/chipbinner.def
   chipbinner: containers/chipbinner.sif
 
-# `pipeline pull chipbinner` downloads these; chipbinner has no URL (built from chipbinner.def).
+# Download sources (chipbinner has none: it is built from containers/chipbinner.def).
 container_urls:
   bedtools: https://depot.galaxyproject.org/singularity/bedtools:2.30.0--hc088bd4_0
