@@ -2,6 +2,7 @@
 # Python stack of snk-chipseq/scripts/chipbinner, pinned to the versions the port
 # was validated with. python-kaleido 0.2.1 bundles its own headless Chromium, so
 # static plots (pdf/png/svg) work on offline compute nodes without apt packages.
+# hdbscan: 0.8.40 is on PyPI only (conda-forge jumps 0.8.39 -> 0.8.41).
 #
 # Build (needs internet, e.g. a Rorqual login node; `pipeline pull chipseq` does this):
 #   apptainer build --fakeroot containers/chipbinner.sif containers/chipbinner.def
@@ -16,7 +17,7 @@ From: mambaorg/micromamba:2.0.5
     export MAMBA_ROOT_PREFIX=/opt/conda
     micromamba install -y -p /opt/conda -c conda-forge -c bioconda --strict-channel-priority \
         python=3.12 \
-        numpy=2.3.5 pandas=2.3.3 scipy=1.16.3 scikit-learn=1.7.2 hdbscan=0.8.40 \
+        numpy=2.3.5 pandas=2.3.3 scipy=1.16.3 scikit-learn=1.7.2 hdbscan=0.8.41 \
         plotly=6.3.0 python-kaleido=0.2.1 \
         pybigwig=0.3.25 pysam=0.23.3 pyyaml=6.0.3 \
         fonts-conda-ecosystem procps-ng

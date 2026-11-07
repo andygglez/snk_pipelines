@@ -259,9 +259,20 @@ def cmd_pull(args):
         if args.dry_run:
             continue
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        if url.startswith(("def:", "docker://")) and not shutil.which("apptainer"):
+            print("    failed: `apptainer` is not on PATH (on Alliance clusters: "
+                  "`module load apptainer`)")
+            failed.append(key)
+            continue
         if url.startswith("def:"):
             # Port-specific image (no nf-core module): built from its definition file.
-            rc = subprocess.call(["apptainer", "build", "--fakeroot", path, url[len("def:"):]])
+            deffile = url[len("def:"):]
+            if not os.path.isfile(deffile):
+                print(f"    failed: definition file not found: {deffile} "
+                      "(copy the port's containers/*.def along with the repo)")
+                failed.append(key)
+                continue
+            rc = subprocess.call(["apptainer", "build", "--fakeroot", path, deffile])
             if rc != 0:
                 print(f"    failed: apptainer build exited with {rc}")
                 failed.append(key)
