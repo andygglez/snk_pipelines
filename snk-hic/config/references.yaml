@@ -1,0 +1,57 @@
+# Reference files this port needs, made by `pipeline references` (see
+# the references engine in pipeline.py and references/assemblies.yaml). Paths are relative to
+# <references>/<assembly>/; {asm} is the assembly name. Files no other entry
+# names are not read by the pipeline automatically: copy their paths into your
+# run config. Indexes are not built here (a run with save_reference builds them).
+# Each build command is the one of the port rule named in its comment, run in
+# that rule's image. Literal braces in `shell` are written {{ }}.
+
+# arms / view_df / gc_phasing_tracks are port extensions for downstream
+# cooltools steps (scripts/make_arms.py, scripts/gc_tracks.py).
+files:
+  fasta:                       # -> fasta
+    catalog: fasta
+    out: "{asm}.fa"
+  fai:                         # CUSTOM_GETCHROMSIZES (samtools faidx)
+    from: [fasta]
+    out: "{asm}.fa.fai"
+    container: samtools_chromsizes
+    shell: "samtools faidx --fai-idx {output} {input[fasta]}"
+  sizes:                       # CUSTOM_GETCHROMSIZES (cut -f 1,2 of the .fai)
+    from: [fai]
+    out: "{asm}.chrom.sizes"
+    container: samtools_chromsizes
+    shell: "cut -f 1,2 {input[fai]} > {output}"
+  restriction_fragments:       # GET_RESTRICTION_FRAGMENTS, one per `digest` key -> restriction_fragments
+    from: [fasta]
+    foreach: {enzyme: "config:digest"}
+    params: {site: "config:digest.{enzyme}.restriction_site"}
+    out: "{asm}.{enzyme}.bed"
+    container: hicpro_python
+    shell: "python {scripts}/digest_genome.py -r '{params[site]}' -o {output} {input[fasta]}"
+  cytoband:                    # UCSC cytoBand (acen bands = centromeres)
+    catalog: cytoband
+    out: "{asm}.cytoBand.txt"
+  arms:                        # chromosome arms (whole chromosomes without acen bands)
+    from: [sizes, cytoband]
+    params: {canonical: "catalog:canonical"}
+    out: "{asm}.arms.bed"
+    container: cooltools_eigs
+    shell: >-
+      python {scripts}/make_arms.py arms --sizes {input[sizes]} --cytoband {input[cytoband]}
+      --canonical '{params[canonical]}' --out {output}
+  view_df:                     # cooltools view: the arms without chrY
+    from: [arms]
+    params: {exclude: '^chrY$'}
+    out: "{asm}.view_df.bed"
+    container: cooltools_eigs
+    shell: "python {scripts}/make_arms.py view --arms {input[arms]} --exclude '{params[exclude]}' --out {output}"
+  gc_phasing_tracks:           # GC fraction per bin (eigs-cis --phasing-track <file>::GC)
+    from: [fasta, fai]
+    expand: {res: "config:mcool_resolutions"}
+    params: {canonical: "catalog:canonical"}
+    out: "gc_phasing_tracks/{res}.gc"
+    container: cooltools_eigs
+    shell: >-
+      python {scripts}/gc_tracks.py --fasta {input[fasta]} --fai {input[fai]}
+      --canonical '{params[canonical]}' --res {expand[res]} --out {output}

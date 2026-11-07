@@ -1,0 +1,75 @@
+# Assembly catalog for `pipeline references` (see the references engine in pipeline.py and
+# docs/superpowers/specs/2026-11-06-pipeline-references-design.md).
+#
+# Each assembly maps a field name to a source or a plain value. A field is a FILE
+# when some snk-<p>/config/references.yaml entry names it with `catalog: <field>`;
+# every other field is a VALUE (listed in <assembly>/README.tsv).
+#
+# Sources: http(s)/ftp URL, repo:<path relative to this repository>,
+# file://<path> or an absolute path. A ".gz" source whose output name has no
+# ".gz" is gunzipped while downloading.
+#
+# A field an assembly lacks (e.g. no blacklist for mm39) makes the entries that
+# use it unavailable: they are skipped with a warning.
+#
+# To add an assembly, add an entry; `canonical` (the chromosomes kept in arms,
+# view and GC tracks) comes from `defaults` unless the entry sets it.
+# Sources checked reachable on 2026-11-06.
+
+defaults:
+  canonical: '^chr([0-9]+|X|Y)$'
+
+assemblies:
+  hg38:
+    description: "Human GRCh38 (UCSC hg38 FASTA, GENCODE v50 GTF)"
+    fasta: https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz
+    gtf: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_50/gencode.v50.annotation.gtf.gz
+    cytoband: https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/cytoBand.txt.gz
+    blacklist: repo:snk-chipseq/assets/blacklists/v2.0/hg38-blacklist.v2.bed
+    mito_name: chrM
+    macs_gsize: 2.7e9
+
+  hg19:
+    description: "Human GRCh37 (UCSC hg19 FASTA, GENCODE v49lift37 GTF)"
+    fasta: https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
+    gtf: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_49/GRCh37_mapping/gencode.v49lift37.annotation.gtf.gz
+    cytoband: https://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/cytoBand.txt.gz
+    blacklist: repo:snk-chipseq/assets/blacklists/v2.0/hg19-blacklist.v2.bed
+    mito_name: chrM
+    macs_gsize: 2.7e9
+
+  mm39:
+    description: "Mouse GRCm39 (UCSC mm39 FASTA, GENCODE vM39 GTF; no blacklist)"
+    fasta: https://hgdownload.soe.ucsc.edu/goldenPath/mm39/bigZips/mm39.fa.gz
+    gtf: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M39/gencode.vM39.annotation.gtf.gz
+    cytoband: https://hgdownload.soe.ucsc.edu/goldenPath/mm39/database/cytoBand.txt.gz
+    mito_name: chrM
+    macs_gsize: 1.87e9
+
+  mm10:
+    description: "Mouse GRCm38 (UCSC mm10 FASTA, GENCODE vM25 GTF)"
+    fasta: https://hgdownload.soe.ucsc.edu/goldenPath/mm10/bigZips/mm10.fa.gz
+    gtf: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M25/gencode.vM25.annotation.gtf.gz
+    cytoband: https://hgdownload.soe.ucsc.edu/goldenPath/mm10/database/cytoBand.txt.gz
+    blacklist: repo:snk-chipseq/assets/blacklists/v2.0/mm10-blacklist.v2.bed
+    mito_name: chrM
+    macs_gsize: 1.87e9
+
+  mm9:
+    description: "Mouse NCBIM37 (UCSC mm9 FASTA, GENCODE vM1 GTF, ENCODE v1 blacklist)"
+    fasta: https://hgdownload.soe.ucsc.edu/goldenPath/mm9/bigZips/mm9.fa.gz
+    gtf: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M1/gencode.vM1.annotation.gtf.gz
+    cytoband: https://hgdownload.soe.ucsc.edu/goldenPath/mm9/database/cytoBand.txt.gz
+    blacklist: https://raw.githubusercontent.com/Boyle-Lab/Blacklist/master/lists/Blacklist_v1/mm9-blacklist.bed.gz
+    mito_name: chrM
+    macs_gsize: 1.87e9
+
+  dm6:
+    description: "Fly BDGP6 (UCSC dm6 FASTA, UCSC ncbiRefSeq GTF)"
+    fasta: https://hgdownload.soe.ucsc.edu/goldenPath/dm6/bigZips/dm6.fa.gz
+    gtf: https://hgdownload.soe.ucsc.edu/goldenPath/dm6/bigZips/genes/dm6.ncbiRefSeq.gtf.gz
+    cytoband: https://hgdownload.soe.ucsc.edu/goldenPath/dm6/database/cytoBand.txt.gz
+    blacklist: repo:snk-chipseq/assets/blacklists/v2.0/dm6-blacklist.v2.bed
+    canonical: '^chr(2L|2R|3L|3R|4|X|Y)$'
+    mito_name: chrM
+    macs_gsize: 1.2e8

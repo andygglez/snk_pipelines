@@ -138,6 +138,82 @@ scale_factor_barplot:
   colors: ["#5677cd", "#000000", "#0e560e", "#4a1170"]  ### <list of colours (by x position), or {condition: colour}>
   error: "sd"                  ### ["sd", "sem"]
   format: "pdf"                ### ["pdf", "png", "svg"]
+
+# ---- chipbinner (port-format samplesheet only; port extension) ----------------
+# Python port of padilr1/ChIPbinner (andygglez/snakemake_chipbinner workflow):
+# the final BAMs (<id>.final.bam) are counted in genome-wide bins, normalised
+# (ChIPbinner norm_bw), averaged over replicates, and two conditions are compared
+# per ChIP protein with a genic/intergenic hexbin scatterplot, HDBSCAN clusters
+# (a grid of minpts x minsamps) and density-based scatterplots. No nf-core
+# counterpart; not reported in the software versions. Annotations are the ones
+# snk-chipseq uses: genome chrom.sizes, `gene_bed` (or the GTF genes), the
+# intergenic BED of the heatmaps and `blacklist`. Images: containers.yaml `chipbinner`.
+# Output: <outdir>/<aligner>/merged_library/chipbinner/
+#   {MS,notMS}bigwigs/<condition>_<protein>_<rep>.binned.bw    per replicate (norm_bw)
+#   {MS,notMS}bigwigs_final/<condition>.<protein>.bw           mean of the replicates
+#   exploratory/<protein>_{PCA,correlation}_plot.<fmt>          all replicates of a protein
+#   comparisons/<treatment>_<baseline>/                          scatterplots, pre_clust files,
+#     clustering/ (HDBSCAN labels, annotated clusters, density plots), <protein>/differential|enrichment/
+chipbinner:
+  # One entry per comparison; chipbinner runs only while this list is not empty
+  # (comparisons: [] turns it off). Every option of an entry is shown below.
+  comparisons:
+    - baseline: T0           ### <samplesheet condition>  # x axis
+      treatment: T15         ### <samplesheet condition>  # y axis
+      proteins: all          ### <all, or a list of ChIP proteins>  # proteins present in both conditions
+      range: auto            ### <auto | [min, max] | {x: [min, max] | auto, y: [min, max] | auto}>  # plot limits; auto = extent of hexes holding > 10 bins
+      pow: 0.75              ### <number>  # exponent of the hexbin count shading
+      overrides: {}          ### <{protein: {range: ..., pow: ...}}>  # per-protein range / pow, e.g. {SPT5: {range: [-5, 1], pow: 1.25}}
+
+  binning:
+    bin_size: 10000          ### <integer>  # bp; bedtools makewindows -w over the genome chrom.sizes
+    windows: ""              ### <path to BED, or "">  # own bin template instead of bin_size
+  MS_normalize: false        ### [true, false]  # true: each replicate's samplesheet scale_factor is its MS coefficient (empty = 1); outputs go to MSbigwigs/
+  norm:                      # ChIPbinner::norm_bw
+    use_input: false         ### [true, false]  # log2(ChIP / input); input = the control snk-chipseq assigns to the replicate
+    depth_norm: true         ### [true, false]  # counts per million
+    raw_count_cutoff: 100    ### <number>  # keep bins with max(raw ChIP, raw input) > cutoff
+    pseudocount: 1.0e-15     ### <number>
+
+  plot_defaults:             # used when a comparison does not set range / pow
+    range: auto              ### <auto | [min, max] | {x: ..., y: ...}>
+    pow: 0.75                ### <number>
+    square_auto_range: true  ### [true, false]  # auto range: same limits on x and y
+  genic_plot:                # genic/intergenic scatterplot
+    hexbins: 150             ### <integer>
+    show_legend: true        ### [true, false]
+    legend_pos: right        ### ["left", "right"]
+    show_scales: true        ### [true, false]
+  density_plot:              # density-based scatterplots (one per grid point and cluster count)
+    hexbins: 150             ### <integer>
+    show_scales: true        ### [true, false]
+    include_additional_density_plot: true  ### [true, false]  # extra magma density panel
+    filter_extreme_bins: true  ### [true, false]  # drop bins outside the 1-99 % quantiles
+    cluster_colors: bright   ### ["bright", "alphabet"]  # alphabet = ChIPbinner's palette
+  clustering:                # HDBSCAN: one job per (minpts, minsamps); each gives one annotation per number_of_clusters
+    minpts: [100, 400, 700, 1000]    ### <list of integers>  # min_cluster_size
+    minsamps: [100, 400, 700, 1000]  ### <list of integers>  # min_samples
+    number_of_clusters: [2, 3]       ### <list of integers, 2..25>
+    cluster_selection_method: eom    ### ["eom", "leaf"]
+  formats: [pdf, html]       ### <list of: html, pdf, png, svg>  # interactive html and/or static (kaleido) plots
+
+  pca:
+    enabled: true            ### [true, false]
+  correlation:
+    enabled: true            ### [true, false]
+    method: pearson          ### ["pearson", "spearman", "kendall"]
+  differential:              # ChIPbinner differentialBinAnalysis (ROTS) on the replicate bigWigs
+    enabled: false           ### [true, false]  # needs >= 2 replicates in both conditions
+    bootstrap: 1000          ### <integer>
+    K: 5000                  ### <integer>  # top-list size
+    clusters: {minpts: 100, minsamps: 100, number_of_clusters: 3}  ### <a clustering grid point>  # clusters to test (stats_per_cluster.csv)
+  enrichment:                # ChIPbinner enrich_clust (LOLA) of each cluster against a region database
+    enabled: false           ### [true, false]
+    db_dir: ""               ### <path to a LOLA regionDB/<genome> folder>  # required when enabled
+    regions: [genome_wide, genic, intergenic]  ### <list of: genome_wide, genic, intergenic>
+    n_elements: 10           ### <integer>  # top region sets plotted
+    cutoff_for_overlap: 0    ### <integer>
+    clusters: {minpts: 100, minsamps: 100, number_of_clusters: 3}  ### <a clustering grid point>
 skip_multiqc: false          ### [true, false]
 
 # ---- MultiQC ----------------------------------------------------------------
@@ -183,3 +259,5 @@ resources:
   process_medium:  {threads: 6,  mem_mb: 36864}  ### {threads: <integer>, mem_mb: <integer>}
   process_high:    {threads: 12, mem_mb: 73728}  ### {threads: <integer>, mem_mb: <integer>}
   bigwig_merge:    {threads: 6,  mem_mb: 8192}   ### {threads: <integer>, mem_mb: <integer>}  # bigwigCompare / bigwigAverage -p
+  chipbinner:      {threads: 1,  mem_mb: 8192}   ### {threads: <integer>, mem_mb: <integer>}  # chipbinner rules
+  chipbinner_hdbscan: {threads: 1, mem_mb: 16384}  ### {threads: <integer>, mem_mb: <integer>}  # one HDBSCAN grid point

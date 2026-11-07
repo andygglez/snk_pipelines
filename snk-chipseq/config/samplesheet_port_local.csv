@@ -1,0 +1,7 @@
+condition,protein,rep,type,fastq1,fastq2,scale_factor
+T0,SPT5,1,narrow,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR1822153_1.fastq.gz,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR1822153_2.fastq.gz,1.0
+T0,SPT5,2,narrow,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR1822154_1.fastq.gz,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR1822154_2.fastq.gz,1.1
+T15,SPT5,1,narrow,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR1822157_1.fastq.gz,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR1822157_2.fastq.gz,0.9
+T15,SPT5,2,narrow,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR1822158_1.fastq.gz,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR1822158_2.fastq.gz,1.0
+pooled,input,1,,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR5204809_Spt5-ChIP_Input1_SacCer_ChIP-Seq_ss100k_R1.fastq.gz,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR5204809_Spt5-ChIP_Input1_SacCer_ChIP-Seq_ss100k_R2.fastq.gz,
+pooled,input,2,,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR5204810_Spt5-ChIP_Input2_SacCer_ChIP-Seq_ss100k_R1.fastq.gz,/scratch/andygg98/claude_jobs/chipseq_testdata/SRR5204810_Spt5-ChIP_Input2_SacCer_ChIP-Seq_ss100k_R2.fastq.gz,

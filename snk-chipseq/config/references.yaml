@@ -1,0 +1,41 @@
+# Reference files this port needs, made by `pipeline references` (see
+# the references engine in pipeline.py and references/assemblies.yaml). Paths are relative to
+# <references>/<assembly>/; {asm} is the assembly name. Files no other entry
+# names are not read by the pipeline automatically: copy their paths into your
+# run config. Indexes are not built here (a run with save_reference builds them).
+# Each build command is the one of the port rule named in its comment, run in
+# that rule's image. Literal braces in `shell` are written {{ }}.
+
+files:
+  fasta:                       # -> fasta
+    catalog: fasta
+    out: "{asm}.fa"
+  gtf:                         # -> gtf
+    catalog: gtf
+    out: "{asm}.gtf"
+
+  blacklist:                   # -> blacklist
+    catalog: blacklist
+    out: "{asm}.blacklist.bed"
+  fai:                         # CUSTOM_GETCHROMSIZES (samtools faidx)
+    from: [fasta]
+    out: "{asm}.fa.fai"
+    container: samtools
+    shell: "samtools faidx --fai-idx {output} {input[fasta]}"
+  sizes:                       # CUSTOM_GETCHROMSIZES (cut -f 1,2 of the .fai)
+    from: [fai]
+    out: "{asm}.chrom.sizes"
+    container: samtools
+    shell: "cut -f 1,2 {input[fai]} > {output}"
+  genes_bed:                   # GTF2BED (bin/gtf2bed) -> gene_bed
+    from: [gtf]
+    out: "{asm}.genes.bed"
+    container: perl
+    shell: "perl {scripts}/gtf2bed {input[gtf]} > {output}"
+  intergenic_bed:              # intergenic_bed (complementBed of the gene BED) -> intergenic_bed
+    from: [genes_bed, sizes]
+    out: "{asm}.intergenic.bed"
+    container: bedtools
+    shell: >-
+      awk 'NR == FNR {{keep[$1]; next}} ($1 in keep)' {input[sizes]} {input[genes_bed]} | cut -f1-3
+      | sortBed -i stdin -g {input[sizes]} | complementBed -i stdin -g {input[sizes]} > {output}

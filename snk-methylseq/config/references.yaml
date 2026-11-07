@@ -1,0 +1,17 @@
+# Reference files this port needs, made by `pipeline references` (see
+# the references engine in pipeline.py and references/assemblies.yaml). Paths are relative to
+# <references>/<assembly>/; {asm} is the assembly name. Files no other entry
+# names are not read by the pipeline automatically: copy their paths into your
+# run config. Indexes are not built here (a run with save_reference builds them).
+# Each build command is the one of the port rule named in its comment, run in
+# that rule's image. Literal braces in `shell` are written {{ }}.
+
+files:
+  fasta:                       # -> fasta
+    catalog: fasta
+    out: "{asm}.fa"
+  fai:                         # SAMTOOLS_FAIDX -> fasta_index
+    from: [fasta]
+    out: "{asm}.fa.fai"
+    container: samtools
+    shell: "samtools faidx --fai-idx {output} {input[fasta]}"

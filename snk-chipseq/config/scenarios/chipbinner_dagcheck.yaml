@@ -1,0 +1,13 @@
+# DAG check (dry run only): snk-chipseq -> chipbinner as one workflow.
+#   snakemake <chipbinner targets> -n --configfile config/test.yaml config/scenarios/chipbinner_dagcheck.yaml
+# Port samplesheet with remote FASTQs (fetch_remote), so no data is needed.
+# skip_trimming removes the trim_summary checkpoint from the path to the final
+# BAMs (a dry run stops at checkpoints); use_input, MS_normalize and differential
+# wire every chipseq output chipbinner can read (controls, scale factors, replicates).
+input: "config/samplesheet.csv"
+outdir: "results_dagcheck"
+skip_trimming: true
+chipbinner:
+  MS_normalize: true
+  norm: {use_input: true}
+  differential: {enabled: true}

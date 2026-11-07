@@ -71,6 +71,8 @@ containers:
   deseq2: containers/depot.galaxyproject.org-singularity-mulled-v2-8849acf39a43cdd6c839a369a74c0adc823e2f91-ab110436faf952a33575c64dd74615a84011450b-0.img
   # MULTIQC
   multiqc: containers/depot.galaxyproject.org-singularity-multiqc-1.23--pyhdfd78af_0.img
+  # chipbinner rules (port extension, no nf-core module): built from containers/chipbinner.def
+  chipbinner: containers/chipbinner.sif
 
 # Where each image above comes from (the URL the nf-core module pins).
 # `pipeline pull <name>` downloads any missing image from here; it has no
@@ -110,3 +112,9 @@ container_urls:
   subread: https://depot.galaxyproject.org/singularity/subread:2.0.1--hed695b0_0
   deseq2: https://depot.galaxyproject.org/singularity/mulled-v2-8849acf39a43cdd6c839a369a74c0adc823e2f91:ab110436faf952a33575c64dd74615a84011450b-0
   multiqc: https://depot.galaxyproject.org/singularity/multiqc:1.23--pyhdfd78af_0
+
+# Images built from an Apptainer definition file instead of pulled from a URL.
+# `pipeline pull <name>` runs `apptainer build --fakeroot <image> <def>` for the
+# missing ones (on a login node: the build downloads packages).
+container_defs:
+  chipbinner: containers/chipbinner.def

@@ -1,0 +1,38 @@
+# chipbinner test on the yeast SPT5 test data (Rorqual, offline). Overlays test_local.yaml:
+#   --configfile config/test_local.yaml config/scenarios/chipbinner_test.yaml
+# Port-format copy of samplesheet.csv with local FASTQs and scale factors; small
+# bins and a small HDBSCAN grid, because the test libraries are ~100k read pairs on
+# a 12 Mb genome. Every chipbinner option that changes the rules is switched on
+# (use_input, MS_normalize, differential); enrichment stays off (no yeast region DB).
+input: "config/samplesheet_port_local.csv"
+outdir: "results_chipbinner_test"
+
+chipbinner:
+  comparisons:
+    - baseline: T0
+      treatment: T15
+      proteins: [SPT5]
+      range: auto
+      pow: 0.75
+      overrides: {SPT5: {pow: 1.0}}
+  binning:
+    bin_size: 2000
+  MS_normalize: true
+  norm:
+    use_input: true
+    raw_count_cutoff: 0
+    pseudocount: 1.0e-3
+  clustering:
+    minpts: [20, 50]
+    minsamps: [20, 50]
+    number_of_clusters: [2, 3]
+  formats: [pdf, html]
+  differential:
+    enabled: true
+    bootstrap: 100
+    K: 1000
+    clusters: {minpts: 20, minsamps: 20, number_of_clusters: 2}
+
+resources:
+  chipbinner:         {threads: 1, mem_mb: 4096}
+  chipbinner_hdbscan: {threads: 1, mem_mb: 4096}

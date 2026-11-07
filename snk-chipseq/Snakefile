@@ -12,6 +12,9 @@
 # featureCounts, DESeq2 QC, IGV session and MultiQC.
 # Not produced: Nextflow run metadata (pipeline_info execution reports, MultiQC
 # workflow summary section). Software versions are collected by software_versions.
+# Port extensions (port-format samplesheets only, no nf-core counterpart):
+# replicate/sample bigWigs, per-protein heatmaps, scale-factor bar plots and
+# chipbinner (padilr1/ChIPbinner port on the final BAMs; section "chipbinner").
 #
 # Rules run in shadow directories with their inputs linked under the file names
 # Nextflow stages, so file names embedded in outputs (BAM @PG lines, samtools
@@ -837,6 +840,8 @@ def all_outputs(wc):
             out += [sample_bigwig(g), sample_bigwig(g, scaled=True)]
         out += heatmap_outputs()
         out += scale_barplot_outputs()
+        if CB_ON:
+            out += cb_outputs()
     for s in ip_samples():
         out += ip_outputs(s)
     peaks = peak_samples()
@@ -2360,6 +2365,543 @@ if NEW_SHEET:
 
 
 # =============================================================================
+# chipbinner (port extension; no nf-core counterpart; port-format samplesheets)
+# =============================================================================
+# Python port of padilr1/ChIPbinner, run as one rule per step of
+# andygglez/snakemake_chipbinner on the final BAMs. Each rule calls one function
+# of scripts/chipbinner/steps.py (`chipbinner_cli.py step <name> --json ...`).
+# Samples come from SAMPLES (condition / protein / rep; the input of a replicate
+# is the control read_port_samplesheet assigns it; its MS coefficient is the
+# samplesheet scale_factor). Annotations are snk-chipseq's: SIZES, GENE_BED,
+# INTERGENIC_BED and BLACKLIST. Not in versions.yaml (no nf-core process).
+# Departures from the snakemake_chipbinner tree, so that one comparison can hold
+# several proteins: legend.png has its own rule, the HDBSCAN logs are named
+# log.<cmp>_<protein>.<i>.<j>.txt, and differential/ and enrichment/ sit under
+# comparisons/<cmp>/<protein>/. Intermediate binned BEDs go to the workdir.
+CB_CFG = config.get("chipbinner") or {}
+CB_ON = NEW_SHEET and bool(CB_CFG.get("comparisons"))
+CB = f"{ML}/chipbinner"
+CBW = f"{W}/chipbinner"
+CB_BWD = f"{CB}/MSbigwigs" if CB_CFG.get("MS_normalize") else f"{CB}/notMSbigwigs"
+CB_COMP_KEYS = ("baseline", "treatment", "proteins", "range", "pow", "overrides")
+CB_RUN = 'export HOME="${{TMPDIR:-/tmp}}"; python3 {SCRIPTS}/chipbinner_cli.py step'
+CB_STATUS = [] if SKIP_TRIM else [f"{W}/status/trim_summary.json"]  # params below read the checkpoint
+
+
+def cb_parse_comparisons():
+    """chipbinner.comparisons, checked against the samplesheet (start-up errors)."""
+    if not CB_ON:
+        return []
+    chip = [(s, m) for s, m in SAMPLES.items() if not m["is_control"]]
+    prots = {}
+    for _, m in chip:
+        prots.setdefault(m["condition"], set()).add(m["protein"])
+    norm, diff, enr = CB_CFG["norm"], CB_CFG["differential"], CB_CFG["enrichment"]
+    comps, names = [], set()
+    for k, c in enumerate(CB_CFG["comparisons"], 1):
+        where = f"chipbinner.comparisons entry {k}"
+        if not isinstance(c, dict) or not c.get("baseline") or not c.get("treatment"):
+            raise ValueError(f"{where}: needs `baseline` and `treatment` (samplesheet conditions); got {c!r}.")
+        unknown = sorted(set(c) - set(CB_COMP_KEYS))
+        if unknown:
+            raise ValueError(f"{where}: unknown key(s) {unknown}; allowed: {', '.join(CB_COMP_KEYS)}.")
+        b, t = str(c["baseline"]), str(c["treatment"])
+        for role, cond in (("baseline", b), ("treatment", t)):
+            if cond not in prots:
+                raise ValueError(f"{where}: {role} {cond!r} is not a condition with ChIP samples in "
+                                 f"{config['input']} (conditions: {', '.join(sorted(prots))}).")
+        if b == t:
+            raise ValueError(f"{where}: baseline and treatment are both {b!r}.")
+        shared = prots[b] & prots[t]
+        want = c.get("proteins", "all")
+        if want in (None, "all"):
+            plist = sorted(shared)
+        else:
+            plist = list(dict.fromkeys(str(p) for p in ([want] if isinstance(want, str) else want)))
+            missing = [p for p in plist if p not in shared]
+            if missing:
+                raise ValueError(f"{where}: protein(s) {missing} not in both {b} and {t} "
+                                 f"(shared: {', '.join(sorted(shared)) or 'none'}).")
+        if not plist:
+            raise ValueError(f"{where}: {b} and {t} share no ChIP protein.")
+        name = f"{t}_{b}"
+        if name in names:
+            raise ValueError(f"{where}: comparison {name} is listed twice.")
+        names.add(name)
+        for p in plist:
+            for cond in (b, t):
+                reps = [s for s, m in chip if m["condition"] == cond and m["protein"] == p]
+                if diff["enabled"] and len(reps) < 2:
+                    raise ValueError(f"{where}: chipbinner.differential needs >= 2 replicates of {cond} {p} "
+                                     f"(found {len(reps)}).")
+                if norm["use_input"]:
+                    lacking = [s for s in reps if not SAMPLES[s]["control"]]
+                    if lacking:
+                        raise ValueError(f"{where}: chipbinner.norm.use_input is set but {', '.join(lacking)} "
+                                         "has no control (input/IgG) in the samplesheet.")
+        comps.append({"name": name, "baseline": b, "treatment": t, "proteins": plist, "raw": c,
+                      "overrides": c.get("overrides") or {}})
+    if enr["enabled"] and not enr["db_dir"]:
+        raise ValueError("chipbinner.enrichment.enabled needs chipbinner.enrichment.db_dir (a LOLA regionDB folder).")
+    for n in CB_CFG["clustering"]["number_of_clusters"]:
+        if not 2 <= int(n) <= 25:
+            raise ValueError(f"chipbinner.clustering.number_of_clusters must be 2..25 (got {n}).")
+    return comps
+
+
+CB_COMPS = cb_parse_comparisons()
+CB_BY_NAME = {c["name"]: c for c in CB_COMPS}
+CB_PROTEINS = sorted({p for c in CB_COMPS for p in c["proteins"]})
+# "<condition>.<protein>" -> (condition, protein), for the merged bigWigs
+CB_GROUPS = {f"{c[r]}.{p}": (c[r], p) for c in CB_COMPS for p in c["proteins"] for r in ("baseline", "treatment")}
+CB_EXPLORE = [k for k in ("pca", "correlation") if CB_CFG.get(k, {}).get("enabled")]
+
+
+def cb_json(**kwargs):
+    return json.dumps(kwargs)
+
+
+def cb_chip_ok():
+    """ChIP replicates with a final BAM (with use_input: whose control has one too)."""
+    if CB_CFG["norm"]["use_input"]:
+        return ip_samples()
+    return [s for s in samples_ok() if not SAMPLES[s]["is_control"]]
+
+
+def cb_reps(cond, protein):
+    ok = set(cb_chip_ok())
+    return [s for s, m in SAMPLES.items()
+            if s in ok and not m["is_control"] and m["condition"] == cond and m["protein"] == protein]
+
+
+def cb_units():
+    """(comparison, protein) pairs with replicates left in both conditions."""
+    return [(c, p) for c in CB_COMPS for p in c["proteins"]
+            if cb_reps(c["baseline"], p) and cb_reps(c["treatment"], p)]
+
+
+def cb_explore_reps(protein):
+    """Replicates of a protein in every condition it is compared in (condition order of first use)."""
+    conds = dict.fromkeys(c[r] for c, p in cb_units() if p == protein for r in ("baseline", "treatment"))
+    return [s for cond in conds for s in cb_reps(cond, protein)]
+
+
+def cb_rep_bw(s):
+    return f"{CB_BWD}/{s}.binned.bw"
+
+
+def cb_final_bw(cond, protein):
+    return f"{CB_BWD}_final/{cond}.{protein}.bw"
+
+
+def cb_cdir(name):
+    return f"{CB}/comparisons/{name}"
+
+
+def cb_prefix(name, protein):
+    return f"{cb_cdir(name)}/{name}_{protein}"
+
+
+def cb_kdir(name):
+    return f"{cb_cdir(name)}/clustering"
+
+
+def cb_hdbscan_files(name, protein, i, j):
+    k, stem = cb_kdir(name), f"{name}_{protein}"
+    return {"labels": f"{k}/clus.{stem}_clustered.{i}.{j}.txt", "png": f"{k}/clus.{stem}_clustered.{i}.{j}.png",
+            "log": f"{k}/log.{stem}.{i}.{j}.txt"}
+
+
+def cb_annotated(name, protein, i, j, n):
+    return f"{cb_kdir(name)}/{name}_{protein}.{n}clusters.{i}.{j}.annotated_clusters.bed"
+
+
+def cb_density_prefix(name, protein, i, j, n):
+    return f"{cb_kdir(name)}/{name}_{protein}_{n}clusters.{i}.{j}.plots_density_scatterplot"
+
+
+def cb_selected(name, protein, sel):
+    """Annotated clusters chosen for differential / enrichment (a clustering grid point)."""
+    return cb_annotated(name, protein, sel["minpts"], sel["minsamps"], sel["number_of_clusters"])
+
+
+def cb_plot_params(name, protein):
+    c = CB_BY_NAME[name]
+    p = dict(CB_CFG["plot_defaults"])
+    p.update({k: c["raw"][k] for k in ("range", "pow") if k in c["raw"]})
+    p.update(c["overrides"].get(protein) or {})
+    return p
+
+
+def cb_differential_files(name, protein):
+    d = f"{cb_cdir(name)}/{protein}/differential"
+    return [f"{d}/{x}" for x in ("stats_for_all_bins_no_clustering.csv", "stats_per_cluster.csv",
+                                 "ROTS_output_summary.txt")]
+
+
+def cb_outputs():
+    fmts, cl = CB_CFG["formats"], CB_CFG["clustering"]
+    units = cb_units()
+    out = []
+    for cond, p in dict.fromkeys((c[r], p) for c, p in units for r in ("baseline", "treatment")):
+        out += [cb_rep_bw(s) for s in cb_reps(cond, p)] + [cb_final_bw(cond, p)]
+    for p in sorted({p for _, p in units}):
+        if len(cb_explore_reps(p)) >= 2:
+            out += [f"{CB}/exploratory/{p}_{'PCA' if k == 'pca' else 'correlation'}_plot.{f}"
+                    for k in CB_EXPLORE for f in fmts]
+    for name in dict.fromkeys(c["name"] for c, _ in units):
+        out.append(f"{cb_cdir(name)}/legend.png")
+    for c, p in units:
+        name, pre = c["name"], cb_prefix(c["name"], p)
+        out += [f"{pre}.plot_range.yaml", f"{pre}.genic.vs.intergenic.png"] + [f"{pre}.scatterplot.{f}" for f in fmts]
+        out += [f"{pre}_preclust_{x}" for x in ("mat.csv", "pooled.bed", "smoothScatter.jpeg")]
+        for i in cl["minpts"]:
+            for j in cl["minsamps"]:
+                out += list(cb_hdbscan_files(name, p, i, j).values())
+                for n in cl["number_of_clusters"]:
+                    out.append(cb_annotated(name, p, i, j, n))
+                    out += [f"{cb_density_prefix(name, p, i, j, n)}.{f}" for f in fmts]
+        if CB_CFG["differential"]["enabled"]:
+            if len(cb_reps(c["treatment"], p)) >= 2 and len(cb_reps(c["baseline"], p)) >= 2:
+                out += cb_differential_files(name, p)
+        if CB_CFG["enrichment"]["enabled"]:
+            out.append(f"{cb_cdir(name)}/{p}/enrichment")
+    return out
+
+
+if CB_ON:
+
+    CB_WC = dict(cmp=alternation(CB_BY_NAME), protein=alternation(CB_PROTEINS))
+
+    # Bin template: chipbinner.binning.windows, else bedtools makewindows -w bin_size
+    # over the genome chrom.sizes.
+    rule chipbinner_windows:
+        input:
+            sizes=SIZES,
+            windows=CB_CFG["binning"]["windows"] or [],
+        output:
+            f"{CBW}/windows.bed",
+        params:
+            json=lambda wc, output: cb_json(out=output[0], chrom_sizes=SIZES, bin_size=int(CB_CFG["binning"]["bin_size"]),
+                                            windows=CB_CFG["binning"]["windows"] or ""),
+        container:
+            container_path("chipbinner")
+        threads: res("chipbinner")["threads"]
+        resources:
+            mem_mb=res("chipbinner")["mem_mb"],
+        shell:
+            CB_RUN + " windows --json {params.json:q}"
+
+    # bam2bed: every alignment record of the final BAM counted in each window it
+    # overlaps (bedtools bamtobed | intersect -c). ChIP replicates and controls.
+    rule chipbinner_bin:
+        input:
+            bam=clean_bam("{cbsample}"),
+            bai=clean_bam("{cbsample}") + ".bai",
+            windows=f"{CBW}/windows.bed",
+        output:
+            f"{CBW}/bam2bed/{{cbsample}}.binned.bed",
+        wildcard_constraints:
+            cbsample=alternation(SAMPLES),
+        params:
+            json=lambda wc, output: cb_json(bam=clean_bam(wc.cbsample), out=output[0], windows=f"{CBW}/windows.bed"),
+        container:
+            container_path("chipbinner")
+        threads: res("chipbinner")["threads"]
+        resources:
+            mem_mb=res("chipbinner")["mem_mb"],
+        shell:
+            CB_RUN + " bin --json {params.json:q}"
+
+    def cb_control_bed(s):
+        ctrl = SAMPLES[s]["control"]
+        return f"{CBW}/bam2bed/{ctrl}.binned.bed" if CB_CFG["norm"]["use_input"] and ctrl else ""
+
+    # ChIPbinner norm_bw per ChIP replicate (log2 over its control with use_input;
+    # x samplesheet scale_factor with MS_normalize).
+    rule chipbinner_norm:
+        input:
+            binned=f"{CBW}/bam2bed/{{cbsample}}.binned.bed",
+            control=lambda wc: cb_control_bed(wc.cbsample) or [],
+            sizes=SIZES,
+            blacklist=BLACKLIST or [],
+        output:
+            cb_rep_bw("{cbsample}"),
+        wildcard_constraints:
+            cbsample=alternation(s for s, m in SAMPLES.items() if not m["is_control"]),
+        params:
+            json=lambda wc, output: cb_json(
+                binned=f"{CBW}/bam2bed/{wc.cbsample}.binned.bed", out=output[0], chrom_sizes=SIZES,
+                blacklist=BLACKLIST or "", input_binned=cb_control_bed(wc.cbsample),
+                use_input=bool(CB_CFG["norm"]["use_input"]), depth_norm=bool(CB_CFG["norm"]["depth_norm"]),
+                pseudocount=float(CB_CFG["norm"]["pseudocount"]),
+                raw_count_cutoff=float(CB_CFG["norm"]["raw_count_cutoff"]),
+                scaling_factor=float(SAMPLES[wc.cbsample]["scale_factor"]) if CB_CFG["MS_normalize"] else 1.0),
+        container:
+            container_path("chipbinner")
+        threads: res("chipbinner")["threads"]
+        resources:
+            mem_mb=res("chipbinner")["mem_mb"],
+        shell:
+            CB_RUN + " norm --json {params.json:q}"
+
+    # merge_norm_bw: mean of every replicate of a condition x protein (one replicate: copied).
+    rule chipbinner_merge:
+        input:
+            bigwigs=lambda wc: [cb_rep_bw(s) for s in cb_reps(*CB_GROUPS[wc.cbgroup])],
+            sizes=SIZES,
+            status=CB_STATUS,
+        output:
+            f"{CB_BWD}_final/{{cbgroup}}.bw",
+        wildcard_constraints:
+            cbgroup=alternation(CB_GROUPS),
+        params:
+            json=lambda wc, output: cb_json(bigwigs=[cb_rep_bw(s) for s in cb_reps(*CB_GROUPS[wc.cbgroup])],
+                                            out=output[0], chrom_sizes=SIZES),
+        container:
+            container_path("chipbinner")
+        threads: res("chipbinner")["threads"]
+        resources:
+            mem_mb=res("chipbinner")["mem_mb"],
+        shell:
+            CB_RUN + " merge --json {params.json:q}"
+
+    if CB_EXPLORE:
+
+        # plot_PCA / plot_correlation of every replicate of a protein (the conditions it is compared in).
+        rule chipbinner_explore:
+            input:
+                bigwigs=lambda wc: [cb_rep_bw(s) for s in cb_explore_reps(wc.protein)],
+                status=CB_STATUS,
+            output:
+                [f"{CB}/exploratory/{{protein}}_{'PCA' if k == 'pca' else 'correlation'}_plot.{f}"
+                 for k in CB_EXPLORE for f in CB_CFG["formats"]],
+            wildcard_constraints:
+                protein=CB_WC["protein"],
+            params:
+                json=lambda wc: cb_json(
+                    bigwigs=[cb_rep_bw(s) for s in cb_explore_reps(wc.protein)],
+                    labels=cb_explore_reps(wc.protein),
+                    conditions=[SAMPLES[s]["condition"] for s in cb_explore_reps(wc.protein)],
+                    mark=wc.protein, outdir=f"{CB}/exploratory", formats=list(CB_CFG["formats"]),
+                    pca="pca" in CB_EXPLORE, correlation="correlation" in CB_EXPLORE,
+                    method=CB_CFG["correlation"]["method"]),
+            container:
+                container_path("chipbinner")
+            threads: res("chipbinner")["threads"]
+            resources:
+                mem_mb=res("chipbinner")["mem_mb"],
+            shell:
+                CB_RUN + " explore --json {params.json:q}"
+
+    rule chipbinner_legend:
+        output:
+            f"{CB}/comparisons/{{cmp}}/legend.png",
+        wildcard_constraints:
+            cmp=CB_WC["cmp"],
+        params:
+            json=lambda wc, output: cb_json(out=output[0]),
+        container:
+            container_path("chipbinner")
+        threads: res("chipbinner")["threads"]
+        resources:
+            mem_mb=res("chipbinner")["mem_mb"],
+        shell:
+            CB_RUN + " legend --json {params.json:q}"
+
+    def cb_pair(wc):
+        c = CB_BY_NAME[wc.cmp]
+        return {"treated": cb_final_bw(c["treatment"], wc.protein), "baseline": cb_final_bw(c["baseline"], wc.protein)}
+
+    # genic_intergenic_scatterplot (+ genic vs intergenic panels); the plot range used
+    # (auto-detected or from the config) is written to <prefix>.plot_range.yaml.
+    rule chipbinner_scatter:
+        input:
+            unpack(cb_pair),
+            gene=GENE_BED,
+            igr=INTERGENIC_BED,
+        output:
+            rng=f"{CB}/comparisons/{{cmp}}/{{cmp}}_{{protein}}.plot_range.yaml",
+            gvi=f"{CB}/comparisons/{{cmp}}/{{cmp}}_{{protein}}.genic.vs.intergenic.png",
+            plots=[f"{CB}/comparisons/{{cmp}}/{{cmp}}_{{protein}}.scatterplot.{f}" for f in CB_CFG["formats"]],
+        wildcard_constraints:
+            cmp=CB_WC["cmp"],
+            protein=CB_WC["protein"],
+        params:
+            json=lambda wc: cb_json(
+                treated_bw=cb_pair(wc)["treated"], baseline_bw=cb_pair(wc)["baseline"], gene_bed=GENE_BED,
+                igr_bed=INTERGENIC_BED, prefix=cb_prefix(wc.cmp, wc.protein), mark=wc.protein,
+                treatment=CB_BY_NAME[wc.cmp]["treatment"], baseline=CB_BY_NAME[wc.cmp]["baseline"],
+                range=cb_plot_params(wc.cmp, wc.protein)["range"], pow=float(cb_plot_params(wc.cmp, wc.protein)["pow"]),
+                square_auto_range=bool(CB_CFG["plot_defaults"]["square_auto_range"]),
+                genic_plot=CB_CFG["genic_plot"], formats=list(CB_CFG["formats"])),
+        container:
+            container_path("chipbinner")
+        threads: res("chipbinner")["threads"]
+        resources:
+            mem_mb=res("chipbinner")["mem_mb"],
+        shell:
+            CB_RUN + " scatter --json {params.json:q}"
+
+    # pre_clust: (treated, baseline) matrix of the shared bins + their BED + smoothScatter.
+    rule chipbinner_preclust:
+        input:
+            unpack(cb_pair),
+        output:
+            mat=f"{CB}/comparisons/{{cmp}}/{{cmp}}_{{protein}}_preclust_mat.csv",
+            pooled=f"{CB}/comparisons/{{cmp}}/{{cmp}}_{{protein}}_preclust_pooled.bed",
+            jpeg=f"{CB}/comparisons/{{cmp}}/{{cmp}}_{{protein}}_preclust_smoothScatter.jpeg",
+        wildcard_constraints:
+            cmp=CB_WC["cmp"],
+            protein=CB_WC["protein"],
+        params:
+            json=lambda wc: cb_json(
+                treated_bw=cb_pair(wc)["treated"], baseline_bw=cb_pair(wc)["baseline"],
+                prefix=cb_prefix(wc.cmp, wc.protein), treatment=CB_BY_NAME[wc.cmp]["treatment"],
+                baseline=CB_BY_NAME[wc.cmp]["baseline"]),
+        container:
+            container_path("chipbinner")
+        threads: res("chipbinner")["threads"]
+        resources:
+            mem_mb=res("chipbinner")["mem_mb"],
+        shell:
+            CB_RUN + " preclust --json {params.json:q}"
+
+    # generate_clust: HDBSCAN at one (minpts, minsamps) point of the grid.
+    rule chipbinner_hdbscan:
+        input:
+            f"{CB}/comparisons/{{cmp}}/{{cmp}}_{{protein}}_preclust_mat.csv",
+        output:
+            labels=cb_hdbscan_files("{cmp}", "{protein}", "{minpts}", "{minsamps}")["labels"],
+            png=cb_hdbscan_files("{cmp}", "{protein}", "{minpts}", "{minsamps}")["png"],
+            logfile=cb_hdbscan_files("{cmp}", "{protein}", "{minpts}", "{minsamps}")["log"],
+        wildcard_constraints:
+            cmp=CB_WC["cmp"],
+            protein=CB_WC["protein"],
+            minpts=r"\d+",
+            minsamps=r"\d+",
+        params:
+            json=lambda wc, input, output, threads: cb_json(
+                matrix=f"{cb_prefix(wc.cmp, wc.protein)}_preclust_mat.csv", minpts=int(wc.minpts),
+                minsamps=int(wc.minsamps), labels_out=output.labels, png_out=output.png, log_out=output.logfile,
+                treatment=CB_BY_NAME[wc.cmp]["treatment"], baseline=CB_BY_NAME[wc.cmp]["baseline"],
+                cluster_selection_method=CB_CFG["clustering"]["cluster_selection_method"], cores=threads),
+        container:
+            container_path("chipbinner")
+        threads: res("chipbinner_hdbscan")["threads"]
+        resources:
+            mem_mb=res("chipbinner_hdbscan")["mem_mb"],
+        shell:
+            CB_RUN + " hdbscan --json {params.json:q}"
+
+    # annotate_clust (n clusters, A = lowest mean signal) + density_based_scatterplot,
+    # drawn with the range of chipbinner_scatter. Fewer than n clusters: empty files.
+    rule chipbinner_density:
+        input:
+            unpack(cb_pair),
+            mat=f"{CB}/comparisons/{{cmp}}/{{cmp}}_{{protein}}_preclust_mat.csv",
+            pooled=f"{CB}/comparisons/{{cmp}}/{{cmp}}_{{protein}}_preclust_pooled.bed",
+            labels=cb_hdbscan_files("{cmp}", "{protein}", "{minpts}", "{minsamps}")["labels"],
+            rng=f"{CB}/comparisons/{{cmp}}/{{cmp}}_{{protein}}.plot_range.yaml",
+            gene=GENE_BED,
+            igr=INTERGENIC_BED,
+        output:
+            bed=cb_annotated("{cmp}", "{protein}", "{minpts}", "{minsamps}", "{n}"),
+            plots=[f"{cb_density_prefix('{cmp}', '{protein}', '{minpts}', '{minsamps}', '{n}')}.{f}"
+                   for f in CB_CFG["formats"]],
+        wildcard_constraints:
+            cmp=CB_WC["cmp"],
+            protein=CB_WC["protein"],
+            minpts=r"\d+",
+            minsamps=r"\d+",
+            n=r"\d+",
+        params:
+            json=lambda wc, output: cb_json(
+                matrix=f"{cb_prefix(wc.cmp, wc.protein)}_preclust_mat.csv",
+                pooled=f"{cb_prefix(wc.cmp, wc.protein)}_preclust_pooled.bed",
+                labels=cb_hdbscan_files(wc.cmp, wc.protein, wc.minpts, wc.minsamps)["labels"],
+                plot_range=f"{cb_prefix(wc.cmp, wc.protein)}.plot_range.yaml", n=int(wc.n),
+                treated_bw=cb_pair(wc)["treated"], baseline_bw=cb_pair(wc)["baseline"], gene_bed=GENE_BED,
+                igr_bed=INTERGENIC_BED, annotated_out=output.bed,
+                plot_prefix=cb_density_prefix(wc.cmp, wc.protein, wc.minpts, wc.minsamps, wc.n), mark=wc.protein,
+                treatment=CB_BY_NAME[wc.cmp]["treatment"], baseline=CB_BY_NAME[wc.cmp]["baseline"],
+                density_plot=CB_CFG["density_plot"], formats=list(CB_CFG["formats"])),
+        container:
+            container_path("chipbinner")
+        threads: res("chipbinner")["threads"]
+        resources:
+            mem_mb=res("chipbinner")["mem_mb"],
+        shell:
+            CB_RUN + " density --json {params.json:q}"
+
+    if CB_CFG["differential"]["enabled"]:
+
+        def cb_diff_bws(wc, role):
+            c = CB_BY_NAME[wc.cmp]
+            return [cb_rep_bw(s) for s in cb_reps(c[role], wc.protein)]
+
+        # differentialBinAnalysis (ROTS) on the replicate bigWigs; stats_per_cluster.csv uses
+        # the annotated clusters of chipbinner.differential.clusters (empty file without clusters).
+        rule chipbinner_differential:
+            input:
+                treated=lambda wc: cb_diff_bws(wc, "treatment"),
+                baseline=lambda wc: cb_diff_bws(wc, "baseline"),
+                clusters=lambda wc: cb_selected(wc.cmp, wc.protein, CB_CFG["differential"]["clusters"]),
+                blacklist=BLACKLIST or [],
+                status=CB_STATUS,
+            output:
+                cb_differential_files("{cmp}", "{protein}"),
+            wildcard_constraints:
+                cmp=CB_WC["cmp"],
+            protein=CB_WC["protein"],
+            params:
+                json=lambda wc: cb_json(
+                    treated_bws=cb_diff_bws(wc, "treatment"), baseline_bws=cb_diff_bws(wc, "baseline"),
+                    blacklist=BLACKLIST or "", treatment=CB_BY_NAME[wc.cmp]["treatment"],
+                    baseline=CB_BY_NAME[wc.cmp]["baseline"], outdir=f"{cb_cdir(wc.cmp)}/{wc.protein}/differential",
+                    clusters=cb_selected(wc.cmp, wc.protein, CB_CFG["differential"]["clusters"]),
+                    bootstrap=int(CB_CFG["differential"]["bootstrap"]), K=int(CB_CFG["differential"]["K"])),
+            container:
+                container_path("chipbinner")
+            threads: res("chipbinner")["threads"]
+            resources:
+                mem_mb=res("chipbinner")["mem_mb"],
+            shell:
+                CB_RUN + " differential --json {params.json:q}"
+
+    if CB_CFG["enrichment"]["enabled"]:
+
+        # enrich_clust (LOLA) of each cluster of chipbinner.enrichment.clusters x region set.
+        rule chipbinner_enrichment:
+            input:
+                clusters=lambda wc: cb_selected(wc.cmp, wc.protein, CB_CFG["enrichment"]["clusters"]),
+                pooled=f"{CB}/comparisons/{{cmp}}/{{cmp}}_{{protein}}_preclust_pooled.bed",
+                gene=GENE_BED,
+                igr=INTERGENIC_BED,
+            output:
+                directory(f"{CB}/comparisons/{{cmp}}/{{protein}}/enrichment"),
+            wildcard_constraints:
+                cmp=CB_WC["cmp"],
+            protein=CB_WC["protein"],
+            params:
+                json=lambda wc, output: cb_json(
+                    clusters=cb_selected(wc.cmp, wc.protein, CB_CFG["enrichment"]["clusters"]),
+                    pooled=f"{cb_prefix(wc.cmp, wc.protein)}_preclust_pooled.bed",
+                    db_dir=CB_CFG["enrichment"]["db_dir"], gene_bed=GENE_BED, igr_bed=INTERGENIC_BED,
+                    outdir=output[0], stem=f"{wc.cmp}_{wc.protein}",
+                    regions=list(CB_CFG["enrichment"]["regions"]), n_elements=int(CB_CFG["enrichment"]["n_elements"]),
+                    cutoff_for_overlap=int(CB_CFG["enrichment"]["cutoff_for_overlap"]),
+                    formats=list(CB_CFG["formats"])),
+            container:
+                container_path("chipbinner")
+            threads: res("chipbinner")["threads"]
+            resources:
+                mem_mb=res("chipbinner")["mem_mb"],
+            shell:
+                CB_RUN + " enrichment --json {params.json:q}"
+
+
+# =============================================================================
 # deepTools
 # =============================================================================
 PROFILE = f"{ML}/deepTools/plotProfile/{{sample}}.{CLNP}"
@@ -3066,7 +3608,9 @@ VERSIONS_MQC = VERSIONS_YML
 def versions_inputs(wc):
     """Everything else the run produces, so the DAG is complete when it runs."""
     # every other output, so every job stays in the DAG the rule reads
-    return [f for f in all_outputs(wc) if f != VERSIONS_YML and not str(f).startswith(f"{O}/multiqc/")]
+    # chipbinner (port extension, not reported) does not hold the versions file back
+    return [f for f in all_outputs(wc) if f != VERSIONS_YML and not str(f).startswith(f"{O}/multiqc/")
+            and not str(f).startswith(f"{CB}/")]
 
 
 localrules:

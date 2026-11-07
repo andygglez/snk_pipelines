@@ -1,0 +1,33 @@
+# Reference files this port needs, made by `pipeline references` (see
+# the references engine in pipeline.py and references/assemblies.yaml). Paths are relative to
+# <references>/<assembly>/; {asm} is the assembly name. Files no other entry
+# names are not read by the pipeline automatically: copy their paths into your
+# run config. Indexes are not built here (a run with save_reference builds them).
+# Each build command is the one of the port rule named in its comment, run in
+# that rule's image. Literal braces in `shell` are written {{ }}.
+
+files:
+  fasta:                       # -> fasta
+    catalog: fasta
+    out: "{asm}.fa"
+  gtf:                         # -> gtf
+    catalog: gtf
+    out: "{asm}.gtf"
+
+  fai:                         # CUSTOM_GETCHROMSIZES (samtools faidx)
+    from: [fasta]
+    out: "{asm}.fa.fai"
+    container: samtools
+    shell: "samtools faidx --fai-idx {output} {input[fasta]}"
+  sizes:                       # CUSTOM_GETCHROMSIZES (cut -f 1,2 of the .fai)
+    from: [fai]
+    out: "{asm}.chrom.sizes"
+    container: samtools
+    shell: "cut -f 1,2 {input[fai]} > {output}"
+  genes_bed:                   # EAUTILS_GTF2BED (gtf2bed.pl, BED12) -> gene_bed
+    from: [gtf]
+    out: "{asm}.genes.rnaseq.bed"
+    container: gtf2bed
+    shell: >-
+      TPL_args=null TPL_gtf={input[gtf]} TPL_prefix=genes TPL_task_process=EAUTILS_GTF2BED
+      perl {scripts}/gtf2bed.pl && mv genes.bed {output}
