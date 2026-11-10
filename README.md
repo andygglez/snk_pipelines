@@ -214,6 +214,7 @@ for example
 ```
 1. pipeline list                        which pipelines exist, which images are downloaded
 2. pipeline pull <name>                 download missing images     (needs internet)
+   pipeline references -p ~/references  download/build reference files (needs internet)
 3. pipeline config <name> -p <dir>      copy the default config.yaml
 4. edit <dir>/<name>.config.yaml        set input, outdir, references, options
 5. pipeline run <name> -c <cfg> -n      dry run: check the job graph
@@ -263,6 +264,35 @@ pipeline pull rnaseq -c my.yaml  # use image paths overridden in my.yaml
 
 Downloads go to a `.part` file first and are only renamed when complete, so a
 failed download never leaves a broken image behind.
+
+### `pipeline references -p <dir> [-a <assembly>] [--pipeline <name> ...]`
+
+Downloads the base reference files of one assembly and builds the light files
+the pipelines derive from them, into `<dir>/<assembly>/`. Without `-a` you
+choose from a menu (hg38, hg19, mm39, mm10, mm9, dm6). Without `--pipeline` you
+get the files of every pipeline.
+
+```bash
+pipeline references -p ~/references                          # menu
+pipeline references -p ~/references -a mm10 --pipeline hic   # one pipeline
+pipeline references -p ~/references -a hg38 -n               # only list the plan
+```
+
+- **Downloads:** UCSC FASTA and cytoBand, GENCODE GTF, and the ENCODE blacklist.
+  The sources are listed in `references/assemblies.yaml`.
+- **Builds:** `.fai`, chrom sizes, gene/TSS/intergenic BEDs, Hi-C restriction
+  fragments per enzyme, chromosome arms, the cooltools view (`view_df.bed`) and GC
+  phasing tracks (`gc_phasing_tracks/<res>.gc`). Each pipeline's
+  `config/references.yaml` lists its files. They are built with the pipeline's
+  own tools and images, so run `pipeline pull <name>` first.
+- **Not built:** aligner indexes. A run with `save_reference: true` builds them,
+  and you can copy them into the folder yourself.
+- **Not read automatically:** the pipelines never use the folder on their own.
+  Copy the paths you need from `<dir>/<assembly>/README.tsv` into your config.
+- **Re-running:** existing files are skipped, so re-running resumes an interrupted
+  run. `-f` rebuilds everything.
+- **Where to run it:** it needs internet and apptainer, for example a Rorqual
+  login node.
 
 ### `pipeline config <name> -p <path>`
 
@@ -436,7 +466,7 @@ fasta: ""              ### <path or URL: .fa/.fasta(.gz)>  # Genome FASTA (.gz a
 |---|---|
 | `input` | Samplesheet CSV (format per pipeline below). |
 | `outdir` | Published results, with the same layout as nf-core's `--outdir`. |
-| `workdir` | Intermediate files that nf-core keeps in its `work/` (all pipelines except hic). |
+| `workdir` | Intermediate files that nf-core keeps in its `work/`. Empty (the default) = `<outdir>/temp_workdir`; safe to delete after a run. |
 | `fasta` | Genome FASTA (`.gz` allowed). Required. |
 | `resources` | `{threads, mem_mb}` per process label (see below). |
 
@@ -487,8 +517,10 @@ sample,fastq_1,fastq_2,strandedness
 WT_REP1,WT_REP1_R1.fastq.gz,WT_REP1_R2.fastq.gz,auto
 ```
 
-- `strandedness`: `forward`, `reverse`, `unstranded`, or `auto` (inferred
-  with Salmon). Several rows with the same `sample` are runs of one sample and
+- `strandedness` (optional column): `forward`, `reverse`, `unstranded`, or
+  `auto` (inferred with Salmon on 1M reads; the Salmon index is built first if
+  `salmon_index` is empty). An empty cell or a missing column takes the
+  `strandedness` key of `config.yaml` (default `auto`). Several rows with the same `sample` are runs of one sample and
   are concatenated.
 - Key options: `fasta` plus `gtf` (or `gff`), `gencode`, `star_index` /
   `salmon_index` (built if empty), `pseudo_aligner`, `skip_bbsplit` /
@@ -524,9 +556,10 @@ This gives the samples `Parental_rep1`, `Parental_rep2`, `NSD2KO_rep1` and
 #### Differential expression and GSEA (not part of nf-core)
 
 This step goes beyond nf-core/rnaseq, which stops at quantification and
-DESeq2 QC. It runs only when `comparisons` is set in the config, and it needs
-the `condition` column. List each comparison as a baseline and a treatment
-condition:
+DESeq2 QC. It is on by default: the default `config/samplesheet.csv` has a
+`condition` column and `config.yaml` sets one comparison (WT → RAP1_UNINDUCED on
+the test data). Set `comparisons: []` to turn it off. It needs the `condition`
+column. List each comparison as a baseline and a treatment condition:
 
 ```yaml
 comparisons:
@@ -591,8 +624,8 @@ deseq2.size_factors.tsv
 deseq2.pca.pdf / .tsv          PCA of the 500 most variable genes (VST)
 deseq2.log
 NSD2KO_vs_Parental/
-    NSD2KO_vs_Parental.deseq2.results.tsv      every tested gene, sorted by padj
-    NSD2KO_vs_Parental.deseq2.significant.tsv  genes passing de_padj and de_lfc
+    NSD2KO_vs_Parental.deseq2.results.csv      every tested gene, sorted by padj
+    NSD2KO_vs_Parental.deseq2.significant.csv  genes passing de_padj and de_lfc
     NSD2KO_vs_Parental.volcano.pdf / .png
     NSD2KO_vs_Parental.ma.pdf
     gsea/<gmt name>/
@@ -621,15 +654,56 @@ RAP1_UNINDUCED vs. WT, and a toy GMT file.
 Samplesheet:
 
 ```csv
-sample,fastq_1,fastq_2,replicate,antibody,control,control_replicate
-SPT5_T0,SPT5_T0_R1.fastq.gz,SPT5_T0_R2.fastq.gz,1,SPT5,SPT5_INPUT,1
-SPT5_INPUT,INPUT_R1.fastq.gz,INPUT_R2.fastq.gz,1,,,
+condition,protein,rep,type,fastq1,fastq2,scale_factor
+WT,CTCF,1,narrow,WT_CTCF_1_R1.fastq.gz,WT_CTCF_1_R2.fastq.gz,
+WT,H3K36me2,1,broad,WT_K36_1_R1.fastq.gz,WT_K36_1_R2.fastq.gz,0.85
+WT,input,1,,WT_input_1_R1.fastq.gz,WT_input_1_R2.fastq.gz,
 ```
 
-- Leave `fastq_2` empty for single-end data. Control (input) rows leave
-  `antibody` and `control` empty.
-- Key options: `aligner` (`bwa`, `bowtie2`, `chromap`, `star`), `narrow_peak`,
-  `macs_gsize` *or* `read_length`, `blacklist`, `gtf`/`gff`, prebuilt
+- Sample IDs (and file prefixes) are `<condition>_<protein>_<rep>`. Rows with
+  the same three values are runs of one sample and are merged.
+- Required: `condition`, `protein`, `rep`, `fastq1`, and `type` for every
+  non-control row. `fastq2` (empty = single-end) and `scale_factor` (default 1)
+  may be empty or missing.
+- `type`: `narrow` proteins get MACS3 peaks (narrow mode), HOMER annotation,
+  FRiP and consensus peaks. `broad` marks such as H3K36me2 get no peak calling,
+  only BAMs, tracks and QC. One type per protein.
+- Controls: rows whose protein is `input` or `IgG`. A ChIP sample uses the
+  control of its condition with the same `rep`, else that condition's only
+  control; if only one condition has controls, every condition shares them.
+- BAMs, one name per stage: `<id>_T<n>.lib.bam` (one run), `<id>.merged_lib.bam`,
+  `<id>.markedDup.bam`, `<id>.filtered.bam`, and **`<id>.final.bam`** (the clean
+  BAM every later step uses). No IGV session is written.
+- bigWigs (`<aligner>/merged_library/bigwig/`):
+  - `replicate_bws/<id>.final.bw` (reads per million) and `<id>.final.scaled.bw`
+    (× that replicate's `scale_factor`).
+  - `sample_bws/<condition>_<protein>.final.bw`: the mean of its replicates'
+    `.final.bw` (`bigwigCompare --operation mean`, or `bigwigAverage` for 3+).
+    `.final.scaled.bw` is that mean × the mean `scale_factor` of the replicates
+    (`bigwigAverage --scaleFactors` on the merged file).
+- Heatmaps and profiles (`deepTools/heatmaps/<protein>/`): one `computeMatrix`,
+  with its `plotHeatmap` and `plotProfile`, per protein, holding every condition, for each bigWig kind (replicate,
+  replicate_scaled, sample, sample_scaled) and region set:
+  - `tss`: reference-point on the TSS, narrow proteins only.
+  - `genes`: scale-regions over gene bodies. The gene BED is stranded, so the
+    promoter is always on the left.
+  - `intergenic`: scale-regions only, over `intergenic_bed`, or, when that is
+    empty, the gaps between genes (`bedtools complement` of the GTF gene BED).
+  - `enhancers_center` and `enhancers_scaled`: the `enhancer_bed` regions, both
+    reference-point on the centre and scale-regions.
+  - All arguments are in `config.yaml` (`computematrix_*_args`,
+    `computematrix_processors`, `plotheatmap_args`, `plotprofile_args`). `blacklist` is passed as `-bl`.
+- Scale-factor bar plots (`scale_factors/<protein>.scale_factors.barplot.pdf` + `.tsv`):
+  one bar per condition (mean `scale_factor` of its replicates), an SD or SEM
+  error bar and one dot per replicate. They're made for every protein with at
+  least one `scale_factor` in the samplesheet. Title (`{protein}` placeholder),
+  axis labels, condition order, colours (a list by position or
+  `{condition: colour}`), error type and format are under `scale_factor_barplot:`
+  in `config.yaml`.
+- The nf-core format (`sample,fastq_1,fastq_2,replicate,antibody,control,control_replicate`)
+  still works unchanged, with nf-core file names, for comparison against nf-core.
+- Key options: `aligner` (`bwa`, `bowtie2`, `chromap`, `star`), `narrow_peak`
+  (nf-core sheets only), `macs_gsize` *or* `read_length`, `blacklist`, `gtf`/`gff`, prebuilt
   `<aligner>_index`.
 
 ### atacseq
@@ -660,7 +734,7 @@ SRR4292758,SRR4292758_R1.fastq.gz,SRR4292758_R2.fastq.gz
 - Key options: `digestion` (`hindiii`, `mboi`, `dpnii`, `arima`), or set
   `restriction_site` and `ligation_site` directly. Also `bin_size` (list of
   resolutions in bp), `bwt2_index` and `chromosome_size` (built if empty).
-- hic has no `workdir`. Everything goes under `outdir`.
+- Intermediates (chunk FastQC, versions) go to `workdir` (default `<outdir>/temp_workdir`).
 
 ### wgbs
 

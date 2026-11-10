@@ -1707,6 +1707,25 @@ rule samtools_idxstats:
 # Merged libraries: PICARD_MERGESAMFILES, BAM_MARKDUPLICATES_PICARD
 # =============================================================================
 
+
+def single_bam_cmd(save):
+    """PICARD_MERGESAMFILES with one input BAM: the module links it (`ln -s`);
+    with publish_dir_mode copy the published BAM is a real file (`cp`).
+
+    The link is RELATIVE to the output's directory. These rules run in a shadow
+    directory, and Snakemake (dag.py unshadow_output, <=9.27) rewrites an
+    absolute output symlink relative to the shadow-dir root instead of the
+    link's own directory, leaving a dangling link and a MissingOutputException.
+    The input is staged at the same relative path inside the shadow dir, so the
+    relative link resolves there and after the move."""
+    def cmd(wc, input, output):
+        if save:
+            return f"cp $(realpath {shlex.quote(input[0])}) {shlex.quote(output[0])}"
+        rel = os.path.relpath(input[0], os.path.dirname(output[0]))
+        return f"ln -s {shlex.quote(rel)} {shlex.quote(output[0])}"
+    return cmd
+
+
 # PICARD_MERGESAMFILES (a single library is linked, as in the module)
 rule picard_mergesamfiles:
     input:
@@ -1716,8 +1735,7 @@ rule picard_mergesamfiles:
     params:
         args=args("picard_mergesamfiles"),
         mem=lambda wc, resources: picard_mem(resources),
-        # publish_dir_mode copy: a real file when the BAM is published
-        single="cp" if SAVE_ALIGN else "ln -s",
+        single=single_bam_cmd(SAVE_ALIGN),
     container:
         container_path("picard")
     threads: res("process_medium")["threads"]
@@ -1734,7 +1752,7 @@ rule picard_mergesamfiles:
             picard -Xmx{params.mem}M MergeSamFiles {params.args} $inputs --OUTPUT {wildcards.sample}.{MRG}.bam
             mv {wildcards.sample}.{MRG}.bam {output}
         else
-            {params.single} $(realpath {input}) {output}
+            {params.single}
         fi
         """
 
@@ -2853,7 +2871,7 @@ if CB_ON:
                 cb_differential_files("{cmp}", "{protein}"),
             wildcard_constraints:
                 cmp=CB_WC["cmp"],
-            protein=CB_WC["protein"],
+                protein=CB_WC["protein"],
             params:
                 json=lambda wc: cb_json(
                     treated_bws=cb_diff_bws(wc, "treatment"), baseline_bws=cb_diff_bws(wc, "baseline"),
@@ -2882,7 +2900,7 @@ if CB_ON:
                 directory(f"{CB}/comparisons/{{cmp}}/{{protein}}/enrichment"),
             wildcard_constraints:
                 cmp=CB_WC["cmp"],
-            protein=CB_WC["protein"],
+                protein=CB_WC["protein"],
             params:
                 json=lambda wc, output: cb_json(
                     clusters=cb_selected(wc.cmp, wc.protein, CB_CFG["enrichment"]["clusters"]),

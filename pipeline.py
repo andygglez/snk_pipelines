@@ -321,6 +321,15 @@ def cmd_run(args):
     binds = [workdir] + [os.path.abspath(b) for b in args.bind]
     if not args.no_auto_bind:
         binds += auto_binds(configfile, workdir)
+    # Snakemake runs every container with `--home <workdir>`, and workdir is
+    # also in `binds`: the same path mounted twice leaves the container's cwd
+    # empty and read-only on Rorqual compute nodes (rules without shadow then
+    # cannot see results/). A later --home in --apptainer-args wins, so HOME
+    # goes to its own directory; --pwd pins the cwd to workdir. Shadow rules
+    # are unaffected: Snakemake appends its own --pwd <shadow dir> after these.
+    apptainer_home = os.path.join(workdir, ".snakemake", "apptainer_home")
+    if not args.dry_run:
+        os.makedirs(apptainer_home, exist_ok=True)
     cmd = [
         find_snakemake(args.snakemake),
         "--snakefile", os.path.join(pdir, "Snakefile"),
@@ -334,7 +343,8 @@ def cmd_run(args):
         configfile,
         "--cores", str(args.threads),
         "--sdm", "apptainer",
-        "--apptainer-args", "--bind " + ",".join(dict.fromkeys(binds)),
+        "--apptainer-args",
+        f"--home {apptainer_home} --pwd {workdir} --bind " + ",".join(dict.fromkeys(binds)),
     ]
     if args.dry_run:
         cmd.append("--dry-run")
