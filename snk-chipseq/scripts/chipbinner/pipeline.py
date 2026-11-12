@@ -53,11 +53,11 @@ DEFAULTS = {
     "merge_replicates": True,
     "norm": {"use_input": False, "depth_norm": True, "raw_count_cutoff": 100, "pseudocount": 1e-15},
     "comparisons": [],
-    "plot_defaults": {"range": "auto", "pow": 0.75, "square_auto_range": True},
-    "genic_plot": {"hexbins": 150, "show_legend": True, "legend_pos": "right", "show_scales": True},
+    "plot_defaults": {"range": "auto", "pow": 0.75, "square_auto_range": True, "auto_quantiles": [0, 1]},
+    "genic_plot": {"hexbins": 150, "show_legend": False, "legend_pos": "right", "show_scales": True},
     "density_plot": {"hexbins": 150, "show_scales": True, "include_additional_density_plot": True,
                      "filter_extreme_bins": True, "cluster_colors": "bright"},
-    "clustering": {"minpts": [100, 400, 700, 1000], "minsamps": [100, 400, 700, 1000],
+    "clustering": {"enabled": True, "minpts": [100, 400, 700, 1000], "minsamps": [100, 400, 700, 1000],
                    "number_of_clusters": [2, 3], "cluster_selection_method": "eom", "cores": 1},
     "formats": ["pdf", "html"],
     "pca": {"enabled": True},
@@ -244,7 +244,8 @@ class Workflow:
             log.warning("%s %s: only %d shared bins, skipping", name, mark, len(pair))
             return
         # ---- plot range: auto-detected or from config; recorded next to the plots
-        rng, src = steps.plot_spec(pair, pp["range"], pp.get("square_auto_range", True))
+        rng, src = steps.plot_spec(pair, pp["range"], pp.get("square_auto_range", True),
+                                   pp.get("auto_quantiles", (0.0, 1.0)))
         steps.write_plot_range(f"{pre}.plot_range.yaml", name, mark, rng, src, pp["pow"])
         spec = {"x": rng[:2], "y": rng[2:]}
         log.info("%s %s: range x=%s y=%s (%s), pow=%s", name, mark, spec["x"], spec["y"], src, pp["pow"])
@@ -255,15 +256,23 @@ class Workflow:
                                self.cfg["genic_plot"], self.formats)
             steps.legend(os.path.join(cdir, "legend.png"))
 
-        # ---- pre_clust (+ smoothScatter) and the genic vs intergenic panels
-        mat_f, bed_f = f"{pre}_preclust_mat.csv", f"{pre}_preclust_pooled.bed"
-        if not self._done(mat_f, bed_f):
-            steps.preclust(bw_t, bw_c, pre, t, c)
+        # ---- genic vs intergenic panels
         if not self._done(f"{pre}.genic.vs.intergenic.png"):
             steps.genic_vs_intergenic(pair, self.gene_bed, self.igr_bed, pre, t, c)
 
-        # ---- HDBSCAN grid, annotation, density-based scatterplots
         cl = self.cfg["clustering"]
+        kdir = os.path.join(self.out, "comparisons", name, "clustering")
+        if not cl.get("enabled", True):  # stop after the scatterplots
+            if self.cfg["differential"]["enabled"]:
+                self.differential(comp, mark, name, kdir)
+            return
+
+        # ---- pre_clust (+ smoothScatter)
+        mat_f, bed_f = f"{pre}_preclust_mat.csv", f"{pre}_preclust_pooled.bed"
+        if not self._done(mat_f, bed_f):
+            steps.preclust(bw_t, bw_c, pre, t, c)
+
+        # ---- HDBSCAN grid, annotation, density-based scatterplots
         kdir = self._mk("comparisons", name, "clustering")
         for i in cl["minpts"]:
             for j in cl["minsamps"]:

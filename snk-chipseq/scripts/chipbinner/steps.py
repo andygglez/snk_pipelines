@@ -27,7 +27,7 @@ log = logging.getLogger("chipbinner")
 PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b", "#e377c2", "#17becf",
            "#7f7f7f", "#bcbd22"]
 MIN_SHARED_BINS = 10
-GENIC_PLOT = {"hexbins": 150, "show_legend": True, "legend_pos": "right", "show_scales": True}
+GENIC_PLOT = {"hexbins": 150, "show_legend": False, "legend_pos": "right", "show_scales": True}
 DENSITY_PLOT = {"hexbins": 150, "show_scales": True, "include_additional_density_plot": True,
                 "filter_extreme_bins": True, "cluster_colors": "bright"}
 
@@ -120,13 +120,14 @@ def legend(out):
     save_fig(extra_plots.genic_legend(), out[: -len(".png")], ["png"])
 
 
-def plot_spec(pair, range="auto", square_auto_range=True):
-    """Plot range -> ({"x": [lo, hi], "y": [lo, hi]}, source); auto parts are found from the data."""
+def plot_spec(pair, range="auto", square_auto_range=True, auto_quantiles=(0.0, 1.0)):
+    """Plot range -> ([min_x, max_x, min_y, max_y], source); auto parts are found from the data
+    (auto_quantiles of the shared bins on each axis; square: union of both axes)."""
     if isinstance(range, str) and range.lower() == "auto":
-        return plots.auto_range(pair, square=bool(square_auto_range)), "auto"
+        return plots.auto_range(pair, quantiles=auto_quantiles, square=bool(square_auto_range)), "auto"
     rng = list(plots.resolve_range(range))
     if any(v is None for v in rng):  # partially automatic ({x: auto, y: [..]})
-        auto = plots.auto_range(pair, square=False)
+        auto = plots.auto_range(pair, quantiles=auto_quantiles, square=False)
         rng = [a if v is None else v for v, a in zip(rng, auto)]
     return rng, "config"
 
@@ -140,7 +141,8 @@ def write_plot_range(path, name, mark, rng, source, pow):
 
 
 def scatter(treated_bw, baseline_bw, gene_bed, igr_bed, prefix, mark, treatment, baseline, range="auto",
-            pow=0.75, square_auto_range=True, genic_plot=None, formats=("pdf", "html")):
+            pow=0.75, square_auto_range=True, genic_plot=None, formats=("pdf", "html"),
+            auto_quantiles=(0.0, 1.0)):
     """genic_intergenic_scatterplot + genic vs intergenic panels; records the range used.
 
     Writes <prefix>.plot_range.yaml, <prefix>.scatterplot.<fmt> and
@@ -158,7 +160,7 @@ def scatter(treated_bw, baseline_bw, gene_bed, igr_bed, prefix, mark, treatment,
             yaml.safe_dump({"comparison": name, "mark": mark, "source": "skipped", "shared_bins": len(pair)},
                            fh, sort_keys=False)
         return
-    rng, src = plot_spec(pair, range, square_auto_range)
+    rng, src = plot_spec(pair, range, square_auto_range, auto_quantiles)
     write_plot_range(f"{prefix}.plot_range.yaml", name, mark, rng, src, pow)
     spec = {"x": rng[:2], "y": rng[2:]}
     log.info("%s %s: range x=%s y=%s (%s), pow=%s", name, mark, spec["x"], spec["y"], src, pow)

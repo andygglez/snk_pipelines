@@ -161,7 +161,7 @@ chipbinner:
     - baseline: T0           ### <samplesheet condition>  # x axis
       treatment: T15         ### <samplesheet condition>  # y axis
       proteins: all          ### <all, or a list of ChIP proteins>  # proteins present in both conditions
-      range: auto            ### <auto | [min, max] | {x: [min, max] | auto, y: [min, max] | auto}>  # plot limits; auto = extent of hexes holding > 10 bins
+      range: auto            ### <auto | [min, max] | {x: [min, max] | auto, y: [min, max] | auto}>  # plot limits; auto = plot_defaults.auto_quantiles of the data (default: full extent)
       pow: 0.75              ### <number>  # exponent of the hexbin count shading
       overrides: {}          ### <{protein: {range: ..., pow: ...}}>  # per-protein range / pow, e.g. {SPT5: {range: [-5, 1], pow: 1.25}}
 
@@ -179,9 +179,10 @@ chipbinner:
     range: auto              ### <auto | [min, max] | {x: ..., y: ...}>
     pow: 0.75                ### <number>
     square_auto_range: true  ### [true, false]  # auto range: same limits on x and y
+    auto_quantiles: [0, 1]   ### <[lo, hi], 0 <= lo < hi <= 1>  # auto range = these quantiles of the shared bins per axis; [0, 1] = full extent (as the lab's ChIPbinner plots)
   genic_plot:                # genic/intergenic scatterplot
     hexbins: 150             ### <integer>
-    show_legend: true        ### [true, false]
+    show_legend: false       ### [true, false]  # inset genic %/bin-count key in the scatterplot (the key is always written to legend.png)
     legend_pos: right        ### ["left", "right"]
     show_scales: true        ### [true, false]
   density_plot:              # density-based scatterplots (one per grid point and cluster count)
@@ -191,6 +192,7 @@ chipbinner:
     filter_extreme_bins: true  ### [true, false]  # drop bins outside the 1-99 % quantiles
     cluster_colors: bright   ### ["bright", "alphabet"]  # alphabet = ChIPbinner's palette
   clustering:                # HDBSCAN: one job per (minpts, minsamps); each gives one annotation per number_of_clusters
+    enabled: true            ### [true, false]  # false: stop after the scatterplots (no pre_clust, HDBSCAN, density plots; enrichment needs it)
     minpts: [100, 400, 700, 1000]    ### <list of integers>  # min_cluster_size
     minsamps: [100, 400, 700, 1000]  ### <list of integers>  # min_samples
     number_of_clusters: [2, 3]       ### <list of integers, 2..25>

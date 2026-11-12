@@ -68,7 +68,7 @@ def add_plot_args(p):
     p.add_argument("--range", dest="plot_range", help='auto | "min,max" | JSON {"x": [..], "y": [..]} '
                    '(overrides --min/--max-x/y)')
     p.add_argument("--axis-title-size", type=int, default=22)
-    p.add_argument("--pow", type=float, default=1.25)
+    p.add_argument("--pow", type=float, default=0.75)
     p.add_argument("--show-scales", type=_bool, default=True)
     p.add_argument("--write-table", action="store_true", help="also write <prefix>.bins.tsv.gz")
 
@@ -112,7 +112,7 @@ def main(argv=None):
     p = sub.add_parser("genic-scatter")
     add_plot_args(p)
     p.add_argument("--hexbins", type=int, default=150)
-    p.add_argument("--show-legend", type=_bool, default=True)
+    p.add_argument("--show-legend", type=_bool, default=False)
     p.add_argument("--legend-pos", default="left", choices=["left", "right"])
 
     p = sub.add_parser("density-scatter")

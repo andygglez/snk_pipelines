@@ -98,17 +98,18 @@ def resolve_range(spec):
     return (lo, hi, lo, hi)
 
 
-def auto_range(pair, xbins=150, quantiles=(0.001, 0.999), min_count=10, square=True):
-    """Automatic plot range from the data: the extent of hexes holding > min_count bins
-    (ChIPbinner's default for min_x/min_y), on the 0.1-99.9 % trimmed bins.
+def auto_range(pair, quantiles=(0.0, 1.0), square=True):
+    """Automatic plot range from the data: the [lo, hi] quantiles of every shared bin
+    (untrimmed), per axis. The default (0, 1) is the full data extent, the range the
+    lab's ChIPbinner (R) plots were drawn with; (0.005, 0.995) etc. drops outlier tails.
     square=True uses the union for both axes (so the y = x diagonal is at 45 degrees).
     Returns [min_x, max_x, min_y, max_y] before the 5 % expansion."""
-    pdat = quantile_filter(pair, *quantiles)
-    cells, _ = hexbin(pdat["x"].to_numpy(), pdat["y"].to_numpy(), xbins=xbins)
-    dense = cells[cells["count"] > min_count]
-    if dense.empty:
-        dense = cells
-    r = [float(dense["x"].min()), float(dense["x"].max()), float(dense["y"].min()), float(dense["y"].max())]
+    lo, hi = (float(q) for q in quantiles)
+    if not 0 <= lo < hi <= 1:
+        raise ValueError(f"auto_quantiles must satisfy 0 <= lo < hi <= 1: {quantiles}")
+    qx = np.quantile(pair["x"].to_numpy(float), [lo, hi])
+    qy = np.quantile(pair["y"].to_numpy(float), [lo, hi])
+    r = [float(qx[0]), float(qx[1]), float(qy[0]), float(qy[1])]
     if square:
         lo, hi = min(r[0], r[2]), max(r[1], r[3])
         r = [lo, hi, lo, hi]
@@ -283,14 +284,14 @@ def _save(fig, out_prefix, formats, scale=2):
 def genic_intergenic_scatterplot(treated_samp_norm_bw, wildtype_samp_norm_bw, genome_assembly="hg38",
                                  gene_bed=None, igr_bed=None, out_prefix=None, formats=("html",),
                                  title_of_plot="", xaxis_label=None, yaxis_label=None,
-                                 min_x=None, max_x=None, min_y=None, max_y=None, pow=1.25, hexbins=150,
-                                 show_scales=True, show_legend=True, legend_pos="left",
+                                 min_x=None, max_x=None, min_y=None, max_y=None, pow=0.75, hexbins=150,
+                                 show_scales=True, show_legend=False, legend_pos="left",
                                  alpha_range=(0.01, 5), quantiles=(0.001, 0.999), panel_size=560,
                                  font_size=14, axis_title_size=22, tick_font_size=16, plot_range=None,
                                  write_table=False):
     """Port of genic_intergenic_scatterplot(): one white panel of genic/intergenic hexbins.
 
-    Defaults follow ChIPbinner (hexbins 150, pow 1.25, alpha range 0.01-5 clipped
+    Defaults follow ChIPbinner (hexbins 150, pow 0.75 (R: 1.25), alpha range 0.01-5 clipped
     at 1, 0.1 %/99.9 % quantile trimming). ``max_x``/``max_y`` are optional here
     (default: as for min, the extent of hexes holding > 10 bins).
     """
@@ -328,7 +329,7 @@ def genic_intergenic_scatterplot(treated_samp_norm_bw, wildtype_samp_norm_bw, ge
 def density_based_scatterplot(treated_samp_norm_bw, wildtype_samp_norm_bw, annotated_clusters,
                               genome_assembly="hg38", gene_bed=None, igr_bed=None, number_of_clusters=None,
                               out_prefix=None, formats=("html",), title_of_plot="", xaxis_label=None,
-                              yaxis_label=None, min_x=None, max_x=None, min_y=None, max_y=None, pow=1.25,
+                              yaxis_label=None, min_x=None, max_x=None, min_y=None, max_y=None, pow=0.75,
                               hexbins=100, show_scales=True, include_additional_density_plot=False,
                               filter_extreme_bins=True, cluster_colors="bright", point_size=2,
                               point_opacity=0.12, alpha_range=(0.01, 3), max_points=120000, show_hulls=False, panel_size=460,
@@ -337,7 +338,7 @@ def density_based_scatterplot(treated_samp_norm_bw, wildtype_samp_norm_bw, annot
     """Port of density_based_scatterplot(): [density |] genic/intergenic | density-based clusters.
 
     ``annotated_clusters`` is the BED written by ``annotate-clust`` (chr, start,
-    end, cluster letter). Defaults follow ChIPbinner (hexbins 100, pow 1.25,
+    end, cluster letter). Defaults follow ChIPbinner (hexbins 100, pow 0.75 (R: 1.25),
     alpha range 0.01-1, 1 %/99 % trimming when ``filter_extreme_bins``).
     ``alpha_range`` defaults to (0.01, 3), clipped at 1 (ChIPbinner: (0.01, 1),
     which leaves most hexes near-black on the black panel).

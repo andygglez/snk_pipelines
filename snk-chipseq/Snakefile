@@ -2461,6 +2461,8 @@ def cb_parse_comparisons():
                       "overrides": c.get("overrides") or {}})
     if enr["enabled"] and not enr["db_dir"]:
         raise ValueError("chipbinner.enrichment.enabled needs chipbinner.enrichment.db_dir (a LOLA regionDB folder).")
+    if enr["enabled"] and not CB_CFG["clustering"].get("enabled", True):
+        raise ValueError("chipbinner.enrichment.enabled needs chipbinner.clustering.enabled (it tests HDBSCAN clusters).")
     for n in CB_CFG["clustering"]["number_of_clusters"]:
         if not 2 <= int(n) <= 25:
             raise ValueError(f"chipbinner.clustering.number_of_clusters must be 2..25 (got {n}).")
@@ -2473,6 +2475,9 @@ CB_PROTEINS = sorted({p for c in CB_COMPS for p in c["proteins"]})
 # "<condition>.<protein>" -> (condition, protein), for the merged bigWigs
 CB_GROUPS = {f"{c[r]}.{p}": (c[r], p) for c in CB_COMPS for p in c["proteins"] for r in ("baseline", "treatment")}
 CB_EXPLORE = [k for k in ("pca", "correlation") if CB_CFG.get(k, {}).get("enabled")]
+# chipbinner.clustering.enabled: false stops after the scatterplots (no pre_clust, HDBSCAN,
+# density plots); differential then runs on all bins only (empty stats_per_cluster.csv).
+CB_CLUST = bool(CB_CFG.get("clustering", {}).get("enabled", True))
 
 
 def cb_json(**kwargs):
@@ -2572,13 +2577,14 @@ def cb_outputs():
     for c, p in units:
         name, pre = c["name"], cb_prefix(c["name"], p)
         out += [f"{pre}.plot_range.yaml", f"{pre}.genic.vs.intergenic.png"] + [f"{pre}.scatterplot.{f}" for f in fmts]
-        out += [f"{pre}_preclust_{x}" for x in ("mat.csv", "pooled.bed", "smoothScatter.jpeg")]
-        for i in cl["minpts"]:
-            for j in cl["minsamps"]:
-                out += list(cb_hdbscan_files(name, p, i, j).values())
-                for n in cl["number_of_clusters"]:
-                    out.append(cb_annotated(name, p, i, j, n))
-                    out += [f"{cb_density_prefix(name, p, i, j, n)}.{f}" for f in fmts]
+        if CB_CLUST:
+            out += [f"{pre}_preclust_{x}" for x in ("mat.csv", "pooled.bed", "smoothScatter.jpeg")]
+            for i in cl["minpts"]:
+                for j in cl["minsamps"]:
+                    out += list(cb_hdbscan_files(name, p, i, j).values())
+                    for n in cl["number_of_clusters"]:
+                        out.append(cb_annotated(name, p, i, j, n))
+                        out += [f"{cb_density_prefix(name, p, i, j, n)}.{f}" for f in fmts]
         if CB_CFG["differential"]["enabled"]:
             if len(cb_reps(c["treatment"], p)) >= 2 and len(cb_reps(c["baseline"], p)) >= 2:
                 out += cb_differential_files(name, p)
@@ -2752,6 +2758,7 @@ if CB_ON:
                 treatment=CB_BY_NAME[wc.cmp]["treatment"], baseline=CB_BY_NAME[wc.cmp]["baseline"],
                 range=cb_plot_params(wc.cmp, wc.protein)["range"], pow=float(cb_plot_params(wc.cmp, wc.protein)["pow"]),
                 square_auto_range=bool(CB_CFG["plot_defaults"]["square_auto_range"]),
+                auto_quantiles=[float(q) for q in CB_CFG["plot_defaults"].get("auto_quantiles", [0, 1])],
                 genic_plot=CB_CFG["genic_plot"], formats=list(CB_CFG["formats"])),
         container:
             container_path("chipbinner")
@@ -2864,7 +2871,8 @@ if CB_ON:
             input:
                 treated=lambda wc: cb_diff_bws(wc, "treatment"),
                 baseline=lambda wc: cb_diff_bws(wc, "baseline"),
-                clusters=lambda wc: cb_selected(wc.cmp, wc.protein, CB_CFG["differential"]["clusters"]),
+                clusters=lambda wc: (cb_selected(wc.cmp, wc.protein, CB_CFG["differential"]["clusters"])
+                                     if CB_CLUST else []),
                 blacklist=BLACKLIST or [],
                 status=CB_STATUS,
             output:
@@ -2877,7 +2885,8 @@ if CB_ON:
                     treated_bws=cb_diff_bws(wc, "treatment"), baseline_bws=cb_diff_bws(wc, "baseline"),
                     blacklist=BLACKLIST or "", treatment=CB_BY_NAME[wc.cmp]["treatment"],
                     baseline=CB_BY_NAME[wc.cmp]["baseline"], outdir=f"{cb_cdir(wc.cmp)}/{wc.protein}/differential",
-                    clusters=cb_selected(wc.cmp, wc.protein, CB_CFG["differential"]["clusters"]),
+                    clusters=(cb_selected(wc.cmp, wc.protein, CB_CFG["differential"]["clusters"])
+                              if CB_CLUST else ""),
                     bootstrap=int(CB_CFG["differential"]["bootstrap"]), K=int(CB_CFG["differential"]["K"])),
             container:
                 container_path("chipbinner")
