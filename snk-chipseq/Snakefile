@@ -2319,8 +2319,13 @@ if NEW_SHEET:
         threads: res("process_low")["threads"]
         resources:
             mem_mb=res("process_low")["mem_mb"],
+        # plotHeatmap through a wrapper that puts the profile legend outside the
+        # plot (deepTools' --legendLocation only places it inside the axes).
         shell:
-            "plotHeatmap -m {input} -o {output} {params.args}"
+            """
+            export MPLCONFIGDIR=${{TMPDIR:-/tmp}}/mplcfg
+            python3 {SCRIPTS}/deeptools_legend_outside.py plotHeatmap -m {input} -o {output} {params.args}
+            """
 
     # Port sheets: bar plot of the samplesheet scale factors of one protein: one
     # bar per condition (mean of its replicates), SD/SEM error bar, replicate dots.
@@ -2378,8 +2383,12 @@ if NEW_SHEET:
         threads: res("process_low")["threads"]
         resources:
             mem_mb=res("process_low")["mem_mb"],
+        # plotProfile through the same wrapper: legend outside the plot.
         shell:
-            "plotProfile -m {input} -o {output} {params.args}"
+            """
+            export MPLCONFIGDIR=${{TMPDIR:-/tmp}}/mplcfg
+            python3 {SCRIPTS}/deeptools_legend_outside.py plotProfile -m {input} -o {output} {params.args}
+            """
 
 
 # =============================================================================

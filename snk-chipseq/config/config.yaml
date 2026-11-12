@@ -117,12 +117,12 @@ bigwig_merge_binsize: 10     ### <integer>  # -bs of bigwigCompare / bigwigAvera
 # Region BED files for these plots (genes and tss use `gene_bed` from References):
 enhancer_bed: ""             ### <path or URL: .bed(.gz), or "">  # empty = no enhancer plots
 intergenic_bed: ""           ### <path or URL: .bed(.gz), or "">  # empty = built: bedtools complement of the gene BED
-computematrix_scale_regions_args: "--binSize 2500 -a 10000 -b 10000 -m 20000 --missingDataAsZero --skipZeros"  ### <string: computeMatrix scale-regions arguments (genes, intergenic, enhancers_scaled)>
-computematrix_reference_point_args: "--referencePoint TSS --binSize 2500 -a 10000 -b 10000 --missingDataAsZero --skipZeros"  ### <string: computeMatrix reference-point arguments (tss)>
-computematrix_enhancer_reference_point_args: "--referencePoint center --binSize 2500 -a 10000 -b 10000 --missingDataAsZero --skipZeros"  ### <string: computeMatrix reference-point arguments (enhancers_center)>
+computematrix_scale_regions_args: "--binSize 500 -a 10000 -b 10000 -m 20000 --missingDataAsZero --skipZeros"  ### <string: computeMatrix scale-regions arguments (genes, intergenic, enhancers_scaled)>
+computematrix_reference_point_args: "--referencePoint TSS --binSize 500 -a 10000 -b 10000 --missingDataAsZero --skipZeros"  ### <string: computeMatrix reference-point arguments (tss)>
+computematrix_enhancer_reference_point_args: "--referencePoint center --binSize 500 -a 10000 -b 10000 --missingDataAsZero --skipZeros"  ### <string: computeMatrix reference-point arguments (enhancers_center)>
 computematrix_processors: "max/2"  ### <integer or "max/2" or "max">  # computeMatrix -p
-plotheatmap_args: "--dpi 600 --perGroup --colorMap Reds"  ### <string: plotHeatmap arguments>
-plotprofile_args: "--dpi 600 --perGroup"  ### <string: plotProfile arguments>
+plotheatmap_args: "--dpi 600 --perGroup --colorMap Reds --heatmapWidth 10"  ### <string: plotHeatmap arguments> (run through scripts/deeptools_legend_outside.py: legend outside the plot)
+plotprofile_args: "--dpi 600 --perGroup"  ### <string: plotProfile arguments> (run through scripts/deeptools_legend_outside.py: legend outside the plot)
 
 # ---- Scale-factor bar plots (port-format samplesheet only) --------------------
 # scale_factors/<protein>.scale_factors.barplot.<format> (+ .tsv with the values):
